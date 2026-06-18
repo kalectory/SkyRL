@@ -274,6 +274,13 @@ class TestWeightUpdateFlow:
             weight_info = ray.get(trainer.get_weight_info.remote())
             print(f"[Step 3] Weight info: {len(weight_info['names'])} parameters")
 
+            # Route via the skyrl wrap (start_weight_update + update_weights_nccl +
+            # finish_weight_update), mirroring BroadcastTransferStrategy.send_chunks.
+            # vLLM 0.23.0's native /update_weights requires a native start_weight_update
+            # bracket; production avoids it (the skyrl wrap loads under
+            # set_current_vllm_config) until vllm-project/vllm#42577 lands.
+            await client.start_weight_update(is_checkpoint_format=True)
+
             # Start trainer broadcast (returns immediately, runs in Ray actor)
             print("[Step 3] Launching trainer broadcast_weights.remote()...")
             trainer_broadcast_ref = trainer.broadcast_weights.remote()
@@ -287,15 +294,16 @@ class TestWeightUpdateFlow:
                 "packed": True,
             }
             print(
-                f"[Step 3] Calling update_named_weights with {len(update_info['names'])} names, packed={update_info['packed']}"
+                f"[Step 3] Calling update_weights_nccl with {len(update_info['names'])} names, packed={update_info['packed']}"
             )
-            result = await client.update_named_weights(update_info)
-            print(f"[Step 3] update_named_weights returned: {list(result.keys())}")
+            result = await client.update_weights_nccl(update_info)
+            print(f"[Step 3] update_weights_nccl returned: {list(result.keys())}")
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
 
             # Trainer should be done now (NCCL broadcast complete)
             ray.get(trainer_broadcast_ref)
+            await client.finish_weight_update()
             print("[Step 3] Weight sync complete")
 
             # ===== Step 4: Query again - should produce correct output =====
@@ -337,36 +345,48 @@ class IpcTrainer:
         return True
 
     def create_ipc_update_info(self) -> dict:
-        """Create IPC handles for all model parameters.
+        """Create a single packed CUDA IPC handle for all model parameters.
 
-        Returns a dict matching the /update_weights API contract:
-        names, dtype_names, shapes, and ipc_handles_pickled (base64).
+        Mirrors the skyrl packed-buffer format consumed by
+        NewInferenceWorkerWrap.update_weights_ipc (see
+        CudaIpcTransferStrategy._send_chunks): all params (one dtype) are copied
+        into one contiguous CUDA buffer, a single IPC handle is created for that
+        buffer keyed by GPU UUID, and per-param `sizes` let the receiver slice it.
         """
         from torch.multiprocessing.reductions import reduce_tensor
 
-        gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+        device = torch.cuda.current_device()
+        gpu_uuid = str(torch.cuda.get_device_properties(device).uuid)
 
-        names, dtype_names, shapes = [], [], []
-        ipc_handles = []
-        tensor_refs = []
+        params = list(self.model.named_parameters())
+        # The model is loaded as bfloat16, so all params share one dtype and packing
+        # into a single contiguous buffer (offsets in element units) is safe.
+        dtype = params[0][1].dtype
+        total_numel = sum(p.numel() for _, p in params)
+        packed_tensor = torch.empty(total_numel, device=device, dtype=dtype, requires_grad=False)
 
-        for name, param in self.model.named_parameters():
-            weight = param.detach().contiguous()
-            tensor_refs.append(weight)
-            handle = reduce_tensor(weight)
-            ipc_handles.append({gpu_uuid: handle})
+        names, dtype_names, shapes, sizes = [], [], [], []
+        offset = 0
+        for name, param in params:
+            weight = param.detach().reshape(-1)
+            size = weight.numel()
+            packed_tensor[offset : offset + size].copy_(weight)
+            offset += size
             names.append(name)
-            dtype_names.append(str(weight.dtype).split(".")[-1])
-            shapes.append(list(weight.shape))
+            dtype_names.append(str(param.dtype).split(".")[-1])
+            shapes.append(list(param.shape))
+            sizes.append(size)
 
-        # Prevent GC so IPC handles remain valid
-        self._tensor_refs = tensor_refs
+        # Keep the packed buffer alive so the IPC handle remains valid on the receiver.
+        self._packed_tensor = packed_tensor
 
-        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
+        handle = reduce_tensor(packed_tensor)
+        pickled = base64.b64encode(pickle.dumps({gpu_uuid: handle})).decode("utf-8")
         return {
             "names": names,
             "dtype_names": dtype_names,
             "shapes": shapes,
+            "sizes": sizes,
             "ipc_handles_pickled": pickled,
         }
 
@@ -460,9 +480,16 @@ class TestColocatedIpcWeightUpdateFlow:
             update_info = ray.get(trainer.create_ipc_update_info.remote())
             print(f"[Step 3] Created handles for {len(update_info['names'])} parameters")
 
-            result = await client.update_named_weights(update_info)
+            # Route via the skyrl wrap (start_weight_update + update_weights_ipc +
+            # finish_weight_update), mirroring CudaIpcTransferStrategy.send_chunks.
+            # vLLM 0.23.0's native /update_weights requires a native start_weight_update
+            # bracket; production avoids it (the skyrl wrap loads under
+            # set_current_vllm_config) until vllm-project/vllm#42577 lands.
+            await client.start_weight_update(is_checkpoint_format=True)
+            result = await client.update_weights_ipc(update_info)
             for server_url, resp_data in result.items():
                 assert resp_data["status"] == 200, f"Server {server_url} IPC update failed: {resp_data}"
+            await client.finish_weight_update()
             print("[Step 3] IPC weight update complete")
 
             # ===== Step 4: Query again — should produce correct output =====
