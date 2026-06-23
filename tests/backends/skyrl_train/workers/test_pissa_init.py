@@ -5,7 +5,11 @@ import math
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import parse_pissa_init, pissa_decompose
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
+    PissaConfig,
+    bridge_a_init_method,
+    pissa_decompose,
+)
 
 
 def _principal(weight, rank):
@@ -83,19 +87,22 @@ def test_factor_symmetry():
     assert math.isclose(linear_out.norm().item(), linear_in.norm().item(), rel_tol=1e-4)
 
 
-@pytest.mark.parametrize(
-    "method,expected",
-    [
-        ("kaiming", None),
-        ("xavier", None),
-        ("zero", None),
-        ("pissa", 0),
-        ("pissa_niter_4", 4),
-        ("pissa_niter_16", 16),
-    ],
-)
-def test_parse_pissa_init(method, expected):
-    assert parse_pissa_init(method) == expected
+@pytest.mark.parametrize("method,niter", [("pissa", 0), ("pissa_niter_4", 4), ("pissa_niter_16", 16)])
+def test_pissa_config_parses_method(method, niter):
+    cfg = PissaConfig.from_init_method(method)
+    assert cfg == PissaConfig(niter=niter)
+
+
+@pytest.mark.parametrize("method", ["kaiming", "xavier", "normal", "zero"])
+def test_non_pissa_init_method_parses_to_none(method):
+    assert PissaConfig.from_init_method(method) is None
+    # Non-PiSSA methods pass through to the bridge unchanged; PiSSA resolves to a placeholder.
+    assert bridge_a_init_method(method) == method
+
+
+@pytest.mark.parametrize("method", ["pissa", "pissa_niter_4"])
+def test_bridge_a_init_method_placeholder_for_pissa(method):
+    assert bridge_a_init_method(method) == "kaiming"
 
 
 def test_niter_reconstructs_weight_for_dominant_spectrum():
