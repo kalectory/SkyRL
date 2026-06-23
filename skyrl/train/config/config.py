@@ -89,6 +89,12 @@ class SkyRLLoraConfig(BaseConfig):
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
+    pissa: bool = False
+    """Megatron only: after the LoRA transform, overwrite adapters with PiSSA init
+    (SVD of the base weight; principal components seed A/B, the residual replaces the
+    frozen base). Requires alpha==rank for the paper's recipe; rank must be divisible
+    by the tensor-parallel size."""
+
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable

@@ -36,6 +36,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import apply_pissa_init
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -597,9 +598,13 @@ class MegatronWorker:
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
 
+            run_pissa = getattr(lora_config, "pissa", False)
+
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
                 self.lora_cls.set_params_to_save(lora_model)
+                if run_pissa:
+                    apply_pissa_init(lora_model)
 
                 return lora_model
 
