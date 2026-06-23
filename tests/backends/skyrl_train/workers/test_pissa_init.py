@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_decompose
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import parse_pissa_init, pissa_decompose
 
 
 def _principal(weight, rank):
@@ -81,3 +81,31 @@ def test_factor_symmetry():
     assert torch.allclose(linear_out.norm(dim=0), expected, atol=1e-4)
     assert torch.allclose(linear_in.norm(dim=1), expected, atol=1e-4)
     assert math.isclose(linear_out.norm().item(), linear_in.norm().item(), rel_tol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "method,expected",
+    [
+        ("kaiming", None),
+        ("xavier", None),
+        ("zero", None),
+        ("pissa", 0),
+        ("pissa_niter_4", 4),
+        ("pissa_niter_16", 16),
+    ],
+)
+def test_parse_pissa_init(method, expected):
+    assert parse_pissa_init(method) == expected
+
+
+def test_niter_reconstructs_weight_for_dominant_spectrum():
+    """Fast randomized SVD (niter>0) still yields W_res + scale·B·A == W on a low-rank-ish matrix."""
+    torch.manual_seed(5)
+    # Construct a matrix whose top-r subspace dominates so randomized SVD is accurate.
+    out, in_, rank = 64, 48, 8
+    base = (torch.randn(out, rank) * torch.arange(rank, 0, -1).float()) @ torch.randn(rank, in_)
+    w = base + 0.01 * torch.randn(out, in_)
+    linear_in, linear_out, residual = pissa_decompose(w, rank, 1.0, niter=8)
+    assert linear_in.shape == (rank, in_) and linear_out.shape == (out, rank)
+    merged = residual + 1.0 * (linear_out @ linear_in)
+    assert torch.allclose(merged, w, atol=1e-4, rtol=1e-4)
