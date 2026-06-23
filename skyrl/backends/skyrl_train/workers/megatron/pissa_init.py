@@ -23,6 +23,7 @@ pretrained HF weights are already loaded). The pristine snapshot taken later
 by ``AdapterStore.register_pristine`` therefore captures the PiSSA state.
 """
 
+import dataclasses
 import math
 from typing import Optional
 
@@ -31,19 +32,53 @@ import torch
 PISSA_PREFIX = "pissa"
 
 
-def parse_pissa_init(init_method: str) -> Optional[int]:
-    """Interpret an ``init_method`` string as PiSSA, mirroring PEFT's convention.
+@dataclasses.dataclass(frozen=True)
+class PissaConfig:
+    """Parsed PiSSA initialization options.
 
-    Returns the fast-SVD iteration count for a PiSSA init, or ``None`` if the
-    method is not PiSSA:
-      "pissa"            -> 0   (exact, full SVD)
-      "pissa_niter_<N>"  -> N   (randomized low-rank SVD with N subspace iters)
+    Carries everything the init needs as typed fields; the ``init_method`` string
+    is parsed once (``from_init_method``) and the object is passed around thereafter.
     """
-    if init_method == PISSA_PREFIX:
-        return 0
-    if init_method.startswith(f"{PISSA_PREFIX}_niter_"):
-        return int(init_method.rsplit("_", 1)[1])
-    return None
+
+    niter: int = 0  # 0 = exact SVD; >0 = torch.svd_lowrank subspace iterations
+
+    @classmethod
+    def from_init_method(cls, init_method: str) -> Optional["PissaConfig"]:
+        """Parse an ``init_method`` string into a PissaConfig, or None if not PiSSA.
+
+        Mirrors PEFT: "pissa" -> exact SVD; "pissa_niter_<N>" -> fast randomized SVD.
+        """
+        if init_method == PISSA_PREFIX:
+            return cls(niter=0)
+        if init_method.startswith(f"{PISSA_PREFIX}_niter_"):
+            return cls(niter=int(init_method.rsplit("_", 1)[1]))
+        return None
+
+
+def bridge_a_init_method(init_method: str) -> str:
+    """Map ``init_method`` to a megatron-bridge-valid ``lora_A_init_method``.
+
+    PiSSA overwrites A/B post-transform and the bridge's ``_get_init_fn`` rejects
+    "pissa", so PiSSA methods resolve to a valid placeholder; all others pass through.
+    """
+    return "kaiming" if PissaConfig.from_init_method(init_method) is not None else init_method
+
+
+def register_pissa_pre_wrap_hook(provider, init_method: str) -> None:
+    """Register a pre-wrap hook that applies PiSSA init when ``init_method`` is PiSSA.
+
+    Registered after the LoRA transform hook, so it runs once the adapters exist
+    and the pretrained weights are loaded; a no-op for non-PiSSA init methods.
+    """
+    config = PissaConfig.from_init_method(init_method)
+    if config is None:
+        return
+
+    def pissa_pre_wrap_hook(model):
+        apply_pissa_init(model, config)
+        return model
+
+    provider.register_pre_wrap_hook(pissa_pre_wrap_hook)
 
 
 def pissa_decompose(weight: torch.Tensor, rank: int, scale: float, niter: int = 0):
@@ -149,7 +184,7 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
 
 
 @torch.no_grad()
-def apply_pissa_init(model_chunks, niter: int = 0) -> None:
+def apply_pissa_init(model_chunks, config: PissaConfig) -> None:
     """Overwrite megatron-bridge LoRA adapters in-place with PiSSA initialization.
 
     Walks every ``LoRALinear`` in the (already weight-loaded, LoRA-transformed)
@@ -159,7 +194,7 @@ def apply_pissa_init(model_chunks, niter: int = 0) -> None:
 
     Args:
       model_chunks: the LoRA-transformed model (single module or VPP chunk list).
-      niter: fast-SVD iteration count (0 = exact SVD); see ``parse_pissa_init``.
+      config: parsed PiSSA options (fast-SVD niter, etc.).
     """
     # Lazy import: megatron.bridge is only importable inside the GPU worker, and
     # keeping these out of module scope lets pissa_decompose be unit-tested on CPU.
@@ -183,10 +218,10 @@ def apply_pissa_init(model_chunks, niter: int = 0) -> None:
             if not isinstance(adapter, ParallelLinearAdapter):
                 skipped += 1
                 continue
-            _init_one_adapter(module.to_wrap, adapter, tp_size, tp_rank, tp_group, niter)
+            _init_one_adapter(module.to_wrap, adapter, tp_size, tp_rank, tp_group, config.niter)
             initialized += 1
 
     logger.info(
-        f"PiSSA(niter={niter}): initialized {initialized} LoRA adapter(s) "
+        f"PiSSA(niter={config.niter}): initialized {initialized} LoRA adapter(s) "
         f"(skipped {skipped} non-parallel/expert adapter(s))"
     )
