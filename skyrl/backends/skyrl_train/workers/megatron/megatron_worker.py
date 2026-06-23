@@ -36,10 +36,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
-    bridge_a_init_method,
-    register_pissa_pre_wrap_hook,
-)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -61,6 +57,7 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -77,6 +74,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
+from skyrl.utils.pissa import PissaConfig
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
@@ -544,7 +542,7 @@ class MegatronWorker:
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
-    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+    def configure_lora(self, lora_config, lora_type: Optional[str], lora_a_init_method: str):
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
@@ -555,7 +553,7 @@ class MegatronWorker:
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
-                lora_A_init_method=bridge_a_init_method(lora_config.init_method),
+                lora_A_init_method=lora_a_init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
@@ -578,7 +576,7 @@ class MegatronWorker:
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
-                lora_A_init_method=bridge_a_init_method(lora_config.init_method),
+                lora_A_init_method=lora_a_init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
             )
@@ -599,7 +597,11 @@ class MegatronWorker:
         )
 
         if lora_config is not None:
-            self.configure_lora(lora_config, lora_type)
+            # PiSSA isn't a megatron-bridge init method (it reads the base weight and
+            # sets A and B jointly), so the bridge gets a standard A-init and PiSSA
+            # overwrites A/B + the base after the transform via its own pre-wrap hook.
+            pissa = PissaConfig.from_init_method(lora_config.init_method)
+            self.configure_lora(lora_config, lora_type, "kaiming" if pissa else lora_config.init_method)
 
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
@@ -608,7 +610,8 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-            register_pissa_pre_wrap_hook(self.provider, lora_config.init_method)
+            if pissa:
+                self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook(pissa))
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
