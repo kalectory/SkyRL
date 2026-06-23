@@ -1,58 +1,24 @@
-"""PiSSA initialization for Megatron LoRA adapters.
+"""Runtime PiSSA initialization for Megatron LoRA adapters.
 
-PiSSA (Meng et al., 2024, https://arxiv.org/abs/2404.02948) replaces LoRA's
-"noise & zero" adapter init with the principal singular components of the base
-weight. For each adapted linear with base weight ``W`` (out, in):
-
-    W = U S Vᵀ                       (economy SVD, singular values descending)
-    linear_out (B) = Uᵣ Sᵣ^½          (out, r)
-    linear_in  (A) = Sᵣ^½ Vᵣᵀ         (r, in)
-    W_res          = W − Uᵣ Sᵣ Vᵣᵀ    (frozen base, replaces W)
-
-so that at init ``W_res + scale·B·A == W`` exactly (the adapter starts on the
-principal subspace; the frozen residual carries the rest).
+Applies PiSSA (the pure math lives in ``skyrl.utils.pissa``) to megatron-bridge
+LoRA adapters *after* the LoRA transform, inside the worker's lora pre-wrap hook
+(by which point the pretrained HF weights are loaded). For each adapted linear,
+the base weight is gathered across tensor-parallel ranks, decomposed, and the
+residual + principal A/B written back in the sharded layout. The pristine
+snapshot taken later by ``AdapterStore.register_pristine`` captures this state.
 
 megatron-bridge's ``ParallelLinearAdapter.forward`` computes
-``(alpha/dim)·linear_out(linear_in(x))``, i.e. the effective delta weight is
-``scale·B·A`` with ``scale = alpha/dim``. We fold ``1/√scale`` into both
-factors so ``scale·B·A`` reproduces the principal component for any alpha.
+``(alpha/dim)·linear_out(linear_in(x))``, so the effective delta weight is
+``scale·B·A`` with ``scale = alpha/dim``; ``pissa_decompose`` folds ``1/√scale``
+into both factors so ``scale·B·A`` reproduces the principal component for any alpha.
 
-This module overwrites the adapter/base tensors *after* the megatron-bridge LoRA
-transform has run (inside the worker's lora pre-wrap hook, by which point the
-pretrained HF weights are already loaded). The pristine snapshot taken later
-by ``AdapterStore.register_pristine`` therefore captures the PiSSA state.
+For the multi-tenant (``merge_lora=false``) serving path, prefer materializing a
+residual base model offline via ``skyrl.utils.pissa.materialize_pissa`` instead.
 """
-
-import dataclasses
-import math
-from typing import Optional
 
 import torch
 
-PISSA_PREFIX = "pissa"
-
-
-@dataclasses.dataclass(frozen=True)
-class PissaConfig:
-    """Parsed PiSSA initialization options.
-
-    Carries everything the init needs as typed fields; the ``init_method`` string
-    is parsed once (``from_init_method``) and the object is passed around thereafter.
-    """
-
-    niter: int = 0  # 0 = exact SVD; >0 = torch.svd_lowrank subspace iterations
-
-    @classmethod
-    def from_init_method(cls, init_method: str) -> Optional["PissaConfig"]:
-        """Parse an ``init_method`` string into a PissaConfig, or None if not PiSSA.
-
-        Mirrors PEFT: "pissa" -> exact SVD; "pissa_niter_<N>" -> fast randomized SVD.
-        """
-        if init_method == PISSA_PREFIX:
-            return cls(niter=0)
-        if init_method.startswith(f"{PISSA_PREFIX}_niter_"):
-            return cls(niter=int(init_method.rsplit("_", 1)[1]))
-        return None
+from skyrl.utils.pissa import PissaConfig, pissa_decompose
 
 
 def bridge_a_init_method(init_method: str) -> str:
@@ -79,51 +45,6 @@ def register_pissa_pre_wrap_hook(provider, init_method: str) -> None:
         return model
 
     provider.register_pre_wrap_hook(pissa_pre_wrap_hook)
-
-
-def pissa_decompose(weight: torch.Tensor, rank: int, scale: float, niter: int = 0):
-    """Decompose a base weight into PiSSA adapter factors + frozen residual.
-
-    Pure tensor math (no distributed / megatron deps) so it is unit-testable on
-    CPU. Operates on the full, unsharded weight in ``(out_features, in_features)``
-    layout (Megatron/torch ``nn.Linear`` convention, ``y = x Wᵀ``).
-
-    Args:
-      weight: full base weight, shape (out, in). Upcast to float32 internally.
-      rank: LoRA rank r (number of principal components to keep).
-      scale: the adapter's ``alpha/dim`` forward scaling factor.
-      niter: 0 for exact SVD; >0 uses ``torch.svd_lowrank`` with this many
-        subspace iterations (the paper's fast-SVD variant, "pissa_niter_N").
-
-    Returns:
-      (linear_in, linear_out, residual) all float32:
-        linear_in:  (r, in)   — adapter A
-        linear_out: (out, r)  — adapter B
-        residual:   (out, in) — frozen base, == weight − scale·linear_out·linear_in
-    """
-    out_features, in_features = weight.shape
-    max_rank = min(out_features, in_features)
-    if rank > max_rank:
-        raise ValueError(f"PiSSA rank {rank} exceeds min(out, in) = {max_rank} for weight {tuple(weight.shape)}")
-
-    w = weight.float()
-    if niter > 0:
-        u_r, s_r, v_r = torch.svd_lowrank(w, q=rank, niter=niter)  # u:(out,r) s:(r) v:(in,r)
-        vh_r = v_r.mH
-    else:
-        u, s, vh = torch.linalg.svd(w, full_matrices=False)  # u:(out,k) s:(k) vh:(k,in)
-        u_r = u[:, :rank]
-        s_r = s[:rank]
-        vh_r = vh[:rank, :]
-
-    sqrt_s = s_r.sqrt()
-    inv = 1.0 / math.sqrt(scale)
-    linear_out = (u_r * sqrt_s.unsqueeze(0)) * inv  # (out, r)
-    linear_in = (sqrt_s.unsqueeze(1) * vh_r) * inv  # (r, in)
-
-    principal = (u_r * s_r.unsqueeze(0)) @ vh_r  # (out, in) == scale·linear_out·linear_in
-    residual = w - principal
-    return linear_in, linear_out, residual
 
 
 def _all_gather(local: torch.Tensor, dim: int, tp_size: int, tp_group) -> torch.Tensor:
