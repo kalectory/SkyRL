@@ -87,14 +87,15 @@ class SkyRLLoraConfig(BaseConfig):
     target_modules: str = "all-linear"
     exclude_modules: Optional[str] = None
     init_method: str = "kaiming"
-    """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
-    For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
-
-    pissa: bool = False
-    """Megatron only: after the LoRA transform, overwrite adapters with PiSSA init
-    (SVD of the base weight; principal components seed A/B, the residual replaces the
-    frozen base). Requires alpha==rank for the paper's recipe; rank must be divisible
-    by the tensor-parallel size."""
+    """LoRA adapter initialization method (mirrors PEFT's ``init_lora_weights``).
+    Standard values: "xavier", "normal", "kaiming", "zero".
+    PiSSA values: "pissa" (exact SVD) or "pissa_niter_<N>" (fast randomized SVD),
+    which seed A/B from the base weight's principal singular components and freeze
+    the residual W_res = W - A·B in place of W.
+    - FSDP: passed straight to PEFT ``init_lora_weights`` (PiSSA handled natively).
+    - Megatron: standard values feed ``lora_A_init_method``; PiSSA values trigger a
+      post-transform SVD overwrite. PiSSA wants alpha==rank, and rank must be
+      divisible by the tensor-parallel size."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
