@@ -600,6 +600,9 @@ class MegatronWorker:
             # PiSSA isn't a megatron-bridge init method (it reads the base weight and
             # sets A and B jointly), so the bridge gets a standard A-init and PiSSA
             # overwrites A/B + the base after the transform via its own pre-wrap hook.
+            # TODO: when the pinned megatron-bridge supports init_lora_weights="pissa"
+            # natively (upstream PR pending), pass init_method straight through here and
+            # delete pissa_pre_wrap_hook + this placeholder.
             pissa = PissaConfig.from_init_method(lora_config.init_method)
             self.configure_lora(lora_config, lora_type, "kaiming" if pissa else lora_config.init_method)
 
