@@ -1,20 +1,15 @@
-"""CPU tests for the Megatron PiSSA helpers (no Megatron/GPU needed).
+"""CPU tests for the Megatron PiSSA glue (no Megatron/GPU needed).
 
-The pure decomposition math and offline materializer are tested in
-tests/utils/test_pissa.py; here we cover the megatron-bridge-specific glue.
+The decomposition math, PissaConfig parsing, and offline materializer are tested
+in tests/utils/test_pissa.py; here we cover the megatron-side hook factory.
 """
 
-import pytest
-
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import bridge_a_init_method
-
-
-@pytest.mark.parametrize("method", ["kaiming", "xavier", "normal", "zero"])
-def test_bridge_a_init_method_passes_through_standard_methods(method):
-    assert bridge_a_init_method(method) == method
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
+from skyrl.utils.pissa import PissaConfig
 
 
-@pytest.mark.parametrize("method", ["pissa", "pissa_niter_4"])
-def test_bridge_a_init_method_placeholder_for_pissa(method):
-    # PiSSA overwrites A post-transform; the bridge gets a valid placeholder.
-    assert bridge_a_init_method(method) == "kaiming"
+def test_pissa_pre_wrap_hook_returns_callable():
+    # The hook is registered after the LoRA transform to overwrite A/B + base;
+    # actually applying it needs Megatron, so just verify the factory wiring here.
+    hook = pissa_pre_wrap_hook(PissaConfig(niter=4))
+    assert callable(hook)
