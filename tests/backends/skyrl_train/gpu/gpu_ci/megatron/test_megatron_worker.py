@@ -401,6 +401,63 @@ async def test_megatron_forward(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("tp", "pp", "gpus_per_node"),
+    [
+        pytest.param(1, 1, 1, id="tp1_pp1"),
+        pytest.param(2, 1, 2, id="tp2_pp1"),
+        pytest.param(2, 2, 4, id="tp2_pp2"),
+    ],
+)
+@pytest.mark.megatron
+async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_per_node):
+    """PiSSA is identity at init: W_res + A·B == W, so a PiSSA-initialized LoRA
+    forward must match the base-model forward. Exercises the TP/PP-sharded
+    residual + A/B write-back (gather base across TP, decompose, reshard).
+    """
+    batch = get_test_training_batch(max(4, gpus_per_node))
+    num_actions = batch.metadata["response_length"]
+
+    def base_cfg():
+        cfg = get_test_actor_config(model_name=MODEL_NAME)
+        cfg.trainer.strategy = "megatron"
+        cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        return cfg
+
+    def megatron_forward(cfg):
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+        all_rank = ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch))
+        output = WorkerOutput.cat(actor_group.actor_infos, all_rank)
+        return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
+
+    # PiSSA-initialized LoRA (alpha == rank); must reproduce the base model at init.
+    pissa_cfg = base_cfg()
+    pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16, init_method="pissa")
+    logprobs_pissa = megatron_forward(pissa_cfg)
+
+    ray.shutdown()
+    ray_init_for_tests()
+
+    # Base model forward (no adapter) = ground-truth W.
+    logprobs_base = megatron_forward(base_cfg())
+
+    response_mask = batch["attention_mask"][:, -num_actions:].bool()
+    diff = torch.abs(logprobs_pissa[response_mask] - logprobs_base[response_mask])
+    max_diff, avg_diff = diff.max().item(), diff.mean().item()
+    print(f"PiSSA(tp={tp},pp={pp}) vs base: max_diff={max_diff} avg_diff={avg_diff}")
+    assert max_diff < 5e-1, f"PiSSA not identity at init: max_diff {max_diff}"
+    assert avg_diff < 9e-2, f"PiSSA not identity at init: avg_diff {avg_diff}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("tp", "pp", "cp", "ep", "etp", "gpus_per_node"),
     [
         (2, 2, 1, 1, None, 4),
