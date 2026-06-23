@@ -21,30 +21,19 @@ import torch
 from skyrl.utils.pissa import PissaConfig, pissa_decompose
 
 
-def bridge_a_init_method(init_method: str) -> str:
-    """Map ``init_method`` to a megatron-bridge-valid ``lora_A_init_method``.
+def pissa_pre_wrap_hook(config: PissaConfig):
+    """Build a pre-wrap hook that applies PiSSA init after the LoRA transform.
 
-    PiSSA overwrites A/B post-transform and the bridge's ``_get_init_fn`` rejects
-    "pissa", so PiSSA methods resolve to a valid placeholder; all others pass through.
+    Register it after the standard LoRA transform hook: it overwrites the
+    freshly-built adapter's A/B and the frozen base with the principal-SVD
+    decomposition, once the pretrained weights are loaded.
     """
-    return "kaiming" if PissaConfig.from_init_method(init_method) is not None else init_method
 
-
-def register_pissa_pre_wrap_hook(provider, init_method: str) -> None:
-    """Register a pre-wrap hook that applies PiSSA init when ``init_method`` is PiSSA.
-
-    Registered after the LoRA transform hook, so it runs once the adapters exist
-    and the pretrained weights are loaded; a no-op for non-PiSSA init methods.
-    """
-    config = PissaConfig.from_init_method(init_method)
-    if config is None:
-        return
-
-    def pissa_pre_wrap_hook(model):
+    def hook(model):
         apply_pissa_init(model, config)
         return model
 
-    provider.register_pre_wrap_hook(pissa_pre_wrap_hook)
+    return hook
 
 
 def _all_gather(local: torch.Tensor, dim: int, tp_size: int, tp_group) -> torch.Tensor:
