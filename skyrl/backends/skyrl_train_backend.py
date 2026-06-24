@@ -20,7 +20,7 @@ from skyrl.backends.renderer import (
     VLLMRenderer,
     render_model_input,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+from skyrl.backends.skyrl_train.inference_servers.utils import _uses_lora_weight_sync, resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
@@ -1087,8 +1087,9 @@ class SkyRLTrainBackend(AbstractBackend):
         # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
         # FFT path falls back to resolve_policy_model_name(cfg).
         fallback_model_name = resolve_policy_model_name(self._cfg)
+        serves_adapters = _uses_lora_weight_sync(self._cfg) and self._base_lora_signature is not None
         per_request_models = [
-            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
+            mid if (serves_adapters and mid in self._model_ids_to_role) else fallback_model_name
             for mid in prepared_batch.all_model_ids
         ]
 
