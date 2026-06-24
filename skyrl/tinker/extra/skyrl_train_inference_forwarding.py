@@ -23,6 +23,11 @@ class SkyRLTrainInferenceForwardingClient:
     def __init__(self, engine_config: EngineConfig, db_engine):
         self.engine_config = engine_config
         self.db_engine = db_engine
+        bc = engine_config.backend_config
+        self._serves_lora_adapters = not (
+            bc.get("strategy") == "megatron"
+            and bc.get("trainer.policy.megatron_config.lora_config.merge_lora", False)
+        )
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
@@ -113,7 +118,12 @@ class SkyRLTrainInferenceForwardingClient:
     ) -> types.SampleOutput:
         # model_id matches the LoRA name registered with vLLM during
         # save_weights_for_sampler; base_model is used for non-LoRA sampling.
-        model_name = base_model if base_model else model_id
+        if base_model:
+            model_name = base_model
+        elif self._serves_lora_adapters:
+            model_name = model_id
+        else:
+            model_name = self.engine_config.base_model
 
         model_input = sample_req.prompt.to_types()
         prompt_tokens = render_model_input([model_input])[0].prompt_ids
