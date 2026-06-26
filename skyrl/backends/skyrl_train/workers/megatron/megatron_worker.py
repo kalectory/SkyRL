@@ -57,7 +57,7 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook, zeroed_adapters
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -696,7 +696,14 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model in HuggingFace safetensors format
+        # Save model in HuggingFace safetensors format. PiSSA produce path: with
+        # export_residual_base set, zero the adapter so the bridge's merge emits the
+        # frozen residual base W_res instead of the reconstructed W (default off).
+        lora_cfg = self.cfg.policy.model.lora
+        if lora_cfg.export_residual_base and PissaConfig.from_init_method(lora_cfg.init_method):
+            with zeroed_adapters(self.model.actor_module):
+                self.strategy.save_hf_model(self.bridge, self.model, export_dir, tokenizer=tokenizer)
+            return
         self.strategy.save_hf_model(
             self.bridge,
             self.model,

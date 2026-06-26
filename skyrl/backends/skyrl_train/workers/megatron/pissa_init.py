@@ -16,9 +16,36 @@ For the multi-tenant (``merge_lora=false``) serving path, prefer materializing a
 residual base model offline via ``skyrl.utils.pissa.materialize_pissa`` instead.
 """
 
+import contextlib
+
 import torch
 
 from skyrl.utils.pissa import PissaConfig, pissa_decompose
+
+
+@contextlib.contextmanager
+def zeroed_adapters(model_chunks):
+    """Temporarily zero every LoRA adapter's linear_out (B), restoring on exit.
+
+    With B=0 the bridge's adapter-merge on HF export emits the frozen base (W_res
+    for PiSSA) instead of base + principal. PiSSA produce path only.
+    """
+    from megatron.bridge.peft.lora_layers import LoRALinear
+    from megatron.bridge.peft.utils import ParallelLinearAdapter
+
+    chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
+    saved = []
+    for chunk in chunks:
+        for module in chunk.modules():
+            if isinstance(module, LoRALinear) and isinstance(module.adapter, ParallelLinearAdapter):
+                b = module.adapter.linear_out.weight
+                saved.append((b, b.data.clone()))
+                b.data.zero_()
+    try:
+        yield
+    finally:
+        for b, orig in saved:
+            b.data.copy_(orig)
 
 
 def pissa_pre_wrap_hook(config: PissaConfig):
