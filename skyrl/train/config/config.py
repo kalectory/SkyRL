@@ -97,6 +97,12 @@ class SkyRLLoraConfig(BaseConfig):
       post-transform SVD overwrite. PiSSA wants alpha==rank, and rank must be
       divisible by the tensor-parallel size."""
 
+    export_residual_base: bool = False
+    """PiSSA produce-only: when exporting the HF model, temporarily zero the LoRA B
+    (linear_out) factor so the bridge's adapter-merge emits the frozen residual base
+    W_res (= base + 0) instead of the reconstructed W. Default off; honored only for
+    PiSSA inits. Used to materialize a W_res base for merge_lora=false serving."""
+
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
