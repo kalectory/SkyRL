@@ -436,8 +436,8 @@ class MegatronWorker:
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
-    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", lora_a_init_method: str | None = None):
-        lora_a_init_method = lora_a_init_method or lora_config.init_method
+    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        lora_a_init_method = "kaiming" if lora_config.init_method == "pissa" else lora_config.init_method
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
@@ -493,10 +493,7 @@ class MegatronWorker:
 
         if lora_config is not None:
             is_pissa = lora_config.init_method == "pissa"
-            if is_pissa:
-                self.configure_lora(lora_config, lora_type, "kaiming")
-            else:
-                self.configure_lora(lora_config, lora_type)
+            self.configure_lora(lora_config, lora_type)
 
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
