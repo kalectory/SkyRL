@@ -4,7 +4,15 @@ import argparse
 import json
 from pathlib import Path
 
+import ray
+import torch
+
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import PiSSAInitWorker
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+from skyrl.train.utils.utils import initialize_ray
 from skyrl.utils.log import logger
+from skyrl.utils.tok import get_tokenizer
 
 
 def _parse_args() -> argparse.Namespace:
@@ -37,17 +45,6 @@ def _write_manifest(output_dir: Path, base_model: str, rank: int, cfg) -> None:
 def main() -> None:
     args = _parse_args()
 
-    import ray
-    import torch
-
-    from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
-        create_pissa_init_worker,
-    )
-    from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-    from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
-    from skyrl.train.utils.utils import initialize_ray
-    from skyrl.utils.tok import get_tokenizer
-
     if args.rank <= 0:
         raise ValueError("--rank must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=False)
@@ -76,7 +73,7 @@ def main() -> None:
             cfg.trainer,
             cfg.trainer.placement.policy_num_nodes,
             cfg.trainer.placement.policy_num_gpus_per_node,
-            create_pissa_init_worker(),
+            PiSSAInitWorker,
             num_gpus_per_actor=1,
             colocate_all=False,
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,

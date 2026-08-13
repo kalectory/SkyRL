@@ -3,7 +3,20 @@
 import contextlib
 import math
 
+import megatron.core.parallel_state as mpu
+import ray
 import torch
+from loguru import logger
+from megatron.bridge.peft.lora_layers import LoRALinear
+from megatron.bridge.peft.utils import ParallelLinearAdapter
+from megatron.core.distributed.distributed_data_parallel_config import (
+    DistributedDataParallelConfig,
+)
+
+from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+    MegatronPolicyWorkerBase,
+)
+from skyrl.train.config.config import get_config_as_dict
 
 
 def pissa_decompose(weight: torch.Tensor, rank: int, scale: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -34,9 +47,6 @@ def validate_pissa_config(rank: int, lora_type: str) -> None:
 @contextlib.contextmanager
 def zeroed_adapters(model_chunks):
     """Temporarily zero LoRA B matrices for residual-base export."""
-    from megatron.bridge.peft.lora_layers import LoRALinear
-    from megatron.bridge.peft.utils import ParallelLinearAdapter
-
     chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
     saved = []
     with torch.no_grad():
@@ -116,11 +126,6 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
 @torch.no_grad()
 def apply_pissa_init(model_chunks) -> None:
     """Overwrite supported Megatron LoRA adapters with PiSSA factors."""
-    import megatron.core.parallel_state as mpu
-    from loguru import logger
-    from megatron.bridge.peft.lora_layers import LoRALinear
-    from megatron.bridge.peft.utils import ParallelLinearAdapter
-
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -149,63 +154,52 @@ def apply_pissa_init(model_chunks) -> None:
     logger.info(f"PiSSA: initialized {len(adapters)} LoRA adapter(s)")
 
 
-def create_pissa_init_worker():
-    """Create the Ray worker used by the offline PiSSA producer."""
-    import ray
-    from megatron.core.distributed.distributed_data_parallel_config import (
-        DistributedDataParallelConfig,
-    )
+class PiSSAInitWorkerBase(MegatronPolicyWorkerBase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        validate_pissa_config(
+            self.cfg.policy.model.lora.rank,
+            self.cfg.policy.megatron_config.lora_config.lora_type,
+        )
 
-    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-        MegatronPolicyWorkerBase,
-    )
-    from skyrl.train.config.config import get_config_as_dict
+    def make_megatron_module(
+        self,
+        wrap_with_ddp=True,
+        ddp_config=None,
+        lora_config=None,
+        lora_type="lora",
+        bf16=True,
+    ):
+        self.configure_lora(lora_config, lora_type)
 
-    class PiSSAInitWorker(MegatronPolicyWorkerBase):
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            validate_pissa_config(
-                self.cfg.policy.model.lora.rank,
-                self.cfg.policy.megatron_config.lora_config.lora_type,
+        def lora_pre_wrap_hook(model):
+            lora_model = self.lora_cls(model, training=True)
+            self.lora_cls.set_params_to_save(lora_model)
+            return lora_model
+
+        self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+        self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
+
+        resolved_ddp_config = DistributedDataParallelConfig()
+        if wrap_with_ddp:
+            resolved_ddp_config.use_distributed_optimizer = True
+        if ddp_config is not None:
+            for key, value in get_config_as_dict(ddp_config).items():
+                setattr(resolved_ddp_config, key, value)
+        return self.provider.provide_distributed_model(
+            ddp_config=resolved_ddp_config,
+            wrap_with_ddp=wrap_with_ddp,
+            bf16=bf16,
+        )
+
+    def save_pissa_residual(self, export_dir: str, tokenizer) -> None:
+        with zeroed_adapters(self.model.actor_module):
+            self.strategy.save_hf_model(
+                self.bridge,
+                self.model,
+                export_dir,
+                tokenizer=tokenizer,
             )
 
-        def make_megatron_module(
-            self,
-            wrap_with_ddp=True,
-            ddp_config=None,
-            lora_config=None,
-            lora_type="lora",
-            bf16=True,
-        ):
-            self.configure_lora(lora_config, lora_type)
 
-            def lora_pre_wrap_hook(model):
-                lora_model = self.lora_cls(model, training=True)
-                self.lora_cls.set_params_to_save(lora_model)
-                return lora_model
-
-            self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-            self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
-
-            resolved_ddp_config = DistributedDataParallelConfig()
-            if wrap_with_ddp:
-                resolved_ddp_config.use_distributed_optimizer = True
-            if ddp_config is not None:
-                for key, value in get_config_as_dict(ddp_config).items():
-                    setattr(resolved_ddp_config, key, value)
-            return self.provider.provide_distributed_model(
-                ddp_config=resolved_ddp_config,
-                wrap_with_ddp=wrap_with_ddp,
-                bf16=bf16,
-            )
-
-        def save_pissa_residual(self, export_dir: str, tokenizer) -> None:
-            with zeroed_adapters(self.model.actor_module):
-                self.strategy.save_hf_model(
-                    self.bridge,
-                    self.model,
-                    export_dir,
-                    tokenizer=tokenizer,
-                )
-
-    return ray.remote(num_gpus=1)(PiSSAInitWorker)
+PiSSAInitWorker = ray.remote(num_gpus=1)(PiSSAInitWorkerBase)

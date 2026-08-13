@@ -2,6 +2,8 @@
 
 PiSSA initialization is an offline step. It writes a Hugging Face residual model and a standard SkyRL step-zero checkpoint containing the initialized adapter and optimizer state.
 
+Current support is experimental and limited to dense Megatron models using standard LoRA adapters. Grouped expert adapters are rejected.
+
 Prepare GSM8K, then produce the initialization artifacts:
 
 ```bash

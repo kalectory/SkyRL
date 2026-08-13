@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import PiSSAInitWorker
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import (
@@ -410,9 +411,7 @@ async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
         rank=32,
         alpha=32,
     )
-    from skyrl.backends.skyrl_train.workers.megatron.pissa_init import create_pissa_init_worker
-
-    logprobs_pissa = megatron_forward(pissa_cfg, worker_cls=create_pissa_init_worker())
+    logprobs_pissa = megatron_forward(pissa_cfg, worker_cls=PiSSAInitWorker)
 
     ray.shutdown()
     ray_init_for_tests()

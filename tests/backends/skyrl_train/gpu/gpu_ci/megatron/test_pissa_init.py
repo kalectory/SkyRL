@@ -1,14 +1,15 @@
 """Tests for PiSSA decomposition and tensor-parallel initialization."""
 
 import json
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from skyrl.backends.skyrl_train.workers.megatron import pissa_init
 from skyrl.train.entrypoints.pissa_init import _write_manifest
+
+pytestmark = pytest.mark.megatron
 
 
 def _principal(weight, rank):
@@ -90,12 +91,8 @@ def test_residual_export_restores_adapter_weights(monkeypatch, export_raises):
             super().__init__()
             self.adapter = ParallelLinearAdapter()
 
-    lora_layers = ModuleType("megatron.bridge.peft.lora_layers")
-    lora_layers.LoRALinear = LoRALinear
-    peft_utils = ModuleType("megatron.bridge.peft.utils")
-    peft_utils.ParallelLinearAdapter = ParallelLinearAdapter
-    monkeypatch.setitem(sys.modules, "megatron.bridge.peft.lora_layers", lora_layers)
-    monkeypatch.setitem(sys.modules, "megatron.bridge.peft.utils", peft_utils)
+    monkeypatch.setattr(pissa_init, "LoRALinear", LoRALinear)
+    monkeypatch.setattr(pissa_init, "ParallelLinearAdapter", ParallelLinearAdapter)
 
     model = torch.nn.Sequential(LoRALinear())
     weight = model[0].adapter.linear_out.weight
