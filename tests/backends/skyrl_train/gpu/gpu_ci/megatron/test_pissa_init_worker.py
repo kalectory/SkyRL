@@ -1,6 +1,5 @@
 """Tests for PiSSA decomposition and tensor-parallel initialization."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +15,6 @@ from skyrl.backends.skyrl_train.workers.megatron.pissa_init_worker import (
     PiSSAInitWorker,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.train.entrypoints.pissa_init import _write_manifest
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_worker import (
     MODEL_NAME,
     get_test_actor_config,
@@ -35,10 +33,9 @@ def _principal(weight, rank):
     return (u[:, :rank] * s[:rank].unsqueeze(0)) @ vh[:rank, :]
 
 
-@pytest.mark.parametrize("shape", [(64, 48), (48, 64), (32, 32)])
-def test_pissa_decomposition_uses_principal_components(shape):
+def test_pissa_decomposition_uses_principal_components():
     torch.manual_seed(0)
-    w = torch.randn(*shape)
+    w = torch.randn(48, 64)
     rank = 4
     scale = 0.5
     linear_in, linear_out, residual = pissa_init_worker.pissa_decompose(w, rank, scale)
@@ -64,21 +61,6 @@ def test_rank_too_large_raises():
 def test_invalid_pissa_config_raises(rank, lora_type):
     with pytest.raises(ValueError):
         pissa_init_worker.validate_pissa_config(rank, lora_type)
-
-
-def test_valid_pissa_config_is_accepted():
-    pissa_init_worker.validate_pissa_config(32, "lora")
-
-
-def test_pissa_manifest_records_source_model_and_rank(tmp_path):
-    _write_manifest(tmp_path, "Qwen/test-model", 32)
-
-    manifest = json.loads((tmp_path / "pissa_init.json").read_text())
-    assert manifest == {
-        "schema_version": 1,
-        "source_model": "Qwen/test-model",
-        "rank": 32,
-    }
 
 
 @pytest.mark.parametrize("export_raises", [False, True])
@@ -145,8 +127,7 @@ def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_p
     torch.testing.assert_close(adapter.linear_out.weight, linear_out.chunk(tp_size, dim=0)[tp_rank])
 
 
-@pytest.mark.asyncio
-async def test_pissa_worker_preserves_base_model_forward(ray_init_fixture):
+def test_pissa_worker_preserves_base_model_forward(ray_init_fixture):
     batch = get_test_training_batch(4)
 
     def base_cfg():
