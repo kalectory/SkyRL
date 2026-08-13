@@ -437,6 +437,7 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        # Megatron Bridge needs a supported initializer before PiSSA overwrites A and B.
         lora_a_init_method = "kaiming" if lora_config.init_method == "pissa" else lora_config.init_method
         if lora_type == "lora":
             self.lora_cls = LoRA(
