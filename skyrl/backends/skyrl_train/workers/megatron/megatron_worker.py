@@ -56,10 +56,7 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
-    pissa_pre_wrap_hook,
-    zeroed_adapters,
-)
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -76,7 +73,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
-from skyrl.utils.pissa import PissaConfig
+from skyrl.utils.pissa import parse_pissa_init_method
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
@@ -496,8 +493,8 @@ class MegatronWorker:
         )
 
         if lora_config is not None:
-            pissa = PissaConfig.from_init_method(lora_config.init_method)
-            if pissa:
+            pissa_niter = parse_pissa_init_method(lora_config.init_method)
+            if pissa_niter is not None:
                 self.configure_lora(lora_config, lora_type, "kaiming")
             else:
                 self.configure_lora(lora_config, lora_type)
@@ -509,8 +506,8 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-            if pissa:
-                self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook(pissa))
+            if pissa_niter is not None:
+                self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook(pissa_niter))
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
@@ -696,11 +693,7 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        lora_cfg = self.cfg.policy.model.lora
-        if lora_cfg.export_residual_base and PissaConfig.from_init_method(lora_cfg.init_method):
-            with zeroed_adapters(self.model.actor_module):
-                self.strategy.save_hf_model(self.bridge, self.model, export_dir, tokenizer=tokenizer)
-            return
+        # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
             self.bridge,
             self.model,

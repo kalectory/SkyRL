@@ -1,38 +1,15 @@
 """Tensor-parallel PiSSA initialization for Megatron LoRA adapters."""
 
-import contextlib
-
 import torch
 
-from skyrl.utils.pissa import PissaConfig, pissa_decompose
+from skyrl.utils.pissa import pissa_decompose
 
 
-@contextlib.contextmanager
-def zeroed_adapters(model_chunks):
-    """Temporarily zero LoRA B factors while exporting the residual base."""
-    from megatron.bridge.peft.lora_layers import LoRALinear
-    from megatron.bridge.peft.utils import ParallelLinearAdapter
-
-    chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
-    saved = []
-    for chunk in chunks:
-        for module in chunk.modules():
-            if isinstance(module, LoRALinear) and isinstance(module.adapter, ParallelLinearAdapter):
-                b = module.adapter.linear_out.weight
-                saved.append((b, b.data.clone()))
-                b.data.zero_()
-    try:
-        yield
-    finally:
-        for b, orig in saved:
-            b.data.copy_(orig)
-
-
-def pissa_pre_wrap_hook(config: PissaConfig):
+def pissa_pre_wrap_hook(niter: int):
     """Build a pre-wrap hook that applies PiSSA after the LoRA transform."""
 
     def hook(model):
-        apply_pissa_init(model, config)
+        apply_pissa_init(model, niter)
         return model
 
     return hook
@@ -88,7 +65,7 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
 
 
 @torch.no_grad()
-def apply_pissa_init(model_chunks, config: PissaConfig) -> None:
+def apply_pissa_init(model_chunks, niter: int) -> None:
     """Overwrite supported Megatron LoRA adapters with PiSSA factors."""
     import megatron.core.parallel_state as mpu
     from loguru import logger
@@ -118,6 +95,6 @@ def apply_pissa_init(model_chunks, config: PissaConfig) -> None:
         raise ValueError("PiSSA found no supported LoRA adapters")
 
     for base_linear, adapter in adapters:
-        _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group, config.niter)
+        _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group, niter)
 
-    logger.info(f"PiSSA(niter={config.niter}): initialized {len(adapters)} LoRA adapter(s)")
+    logger.info(f"PiSSA(niter={niter}): initialized {len(adapters)} LoRA adapter(s)")

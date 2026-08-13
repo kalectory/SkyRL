@@ -1,31 +1,20 @@
 """PiSSA decomposition and offline residual-base materialization."""
 
-import dataclasses
-import logging
 import math
 from typing import Optional
 
 import torch
 
-logger = logging.getLogger(__name__)
-
 PISSA_PREFIX = "pissa"
 
 
-@dataclasses.dataclass(frozen=True)
-class PissaConfig:
-    """Parsed PiSSA initialization options."""
-
-    niter: int = 0  # 0 = exact SVD; >0 = torch.svd_lowrank subspace iterations
-
-    @classmethod
-    def from_init_method(cls, init_method: str) -> Optional["PissaConfig"]:
-        """Parse PEFT-compatible PiSSA initialization names."""
-        if init_method == PISSA_PREFIX:
-            return cls(niter=0)
-        if init_method.startswith(f"{PISSA_PREFIX}_niter_"):
-            return cls(niter=int(init_method.rsplit("_", 1)[1]))
-        return None
+def parse_pissa_init_method(init_method: str) -> Optional[int]:
+    """Return the PiSSA SVD iteration count, or ``None`` for another initializer."""
+    if init_method == PISSA_PREFIX:
+        return 0
+    if init_method.startswith(f"{PISSA_PREFIX}_niter_"):
+        return int(init_method.rsplit("_", 1)[1])
+    return None
 
 
 def pissa_decompose(weight: torch.Tensor, rank: int, scale: float, niter: int = 0):
@@ -89,12 +78,7 @@ def materialize_pissa(
     peft_model.save_pretrained(adapter_dir)
     residual_model = peft_model.unload()
     residual_model.save_pretrained(residual_base_dir)
-    try:
-        AutoTokenizer.from_pretrained(model_path).save_pretrained(residual_base_dir)
-    except (OSError, ValueError) as exc:
-        logger.warning(
-            "PiSSA: could not copy tokenizer from %s (%s); residual base written without it.", model_path, exc
-        )
+    AutoTokenizer.from_pretrained(model_path).save_pretrained(residual_base_dir)
     return residual_base_dir, adapter_dir
 
 

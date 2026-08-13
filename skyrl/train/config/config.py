@@ -89,9 +89,6 @@ class SkyRLLoraConfig(BaseConfig):
     init_method: str = "kaiming"
     """LoRA initialization method, including ``pissa`` and ``pissa_niter_<N>``."""
 
-    export_residual_base: bool = False
-    """Export PiSSA's frozen residual instead of the adapter-merged model."""
-
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable

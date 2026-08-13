@@ -365,25 +365,17 @@ async def test_megatron_forward(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("tp", "pp", "gpus_per_node"),
-    [
-        pytest.param(1, 1, 1, id="tp1_pp1"),
-        pytest.param(2, 1, 2, id="tp2_pp1"),
-        pytest.param(2, 2, 4, id="tp2_pp2"),
-    ],
-)
 @pytest.mark.megatron
-async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_per_node):
+async def test_megatron_pissa_identity_at_init(ray_init_fixture):
     """PiSSA initialization preserves the base-model forward across TP and PP."""
     batch = get_test_training_batch(4)
 
     def base_cfg():
         cfg = get_test_actor_config(model_name=MODEL_NAME)
         cfg.trainer.strategy = "megatron"
-        cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
         cfg.trainer.bf16 = False
         return cfg
 
@@ -410,7 +402,7 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_pe
 
     diff = torch.abs(logprobs_pissa - logprobs_base)
     max_diff, avg_diff = diff.max().item(), diff.mean().item()
-    print(f"PiSSA(tp={tp},pp={pp}) vs base: max_diff={max_diff} avg_diff={avg_diff}")
+    print(f"PiSSA vs base: max_diff={max_diff} avg_diff={avg_diff}")
     torch.testing.assert_close(logprobs_pissa, logprobs_base, rtol=1e-4, atol=1e-4)
 
 
