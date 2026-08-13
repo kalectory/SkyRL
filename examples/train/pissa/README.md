@@ -15,7 +15,6 @@ PISSA_INIT_DIR="$HOME/pissa/qwen3_0.6b_r32" \
 The producer creates:
 
 ```text
-pissa_init.json
 residual_base/
 global_step_0/
 ```
@@ -27,6 +26,6 @@ PISSA_INIT_DIR="$HOME/pissa/qwen3_0.6b_r32" \
   bash examples/train/pissa/run_megatron_pissa_qwen3-0.6b.sh
 ```
 
-The launcher reads the source model and LoRA rank from `pissa_init.json`, prints the resolved values, and then appends any additional arguments. User arguments therefore override its defaults. The policy loads the residual model and resumes the initialized adapter from `global_step_0`; the frozen KL reference loads the original source model.
+The policy loads the residual model and resumes the initialized adapter from `global_step_0`; the frozen KL reference loads the original source model. Additional arguments appended to the launcher override its defaults.
 
 PiSSA uses `alpha=rank`, `target_modules=all-linear`, and no exclusions. Apart from loading the PiSSA artifacts, the training example matches `examples/train/megatron/run_megatron_lora_qwen3-0.6b.sh`.

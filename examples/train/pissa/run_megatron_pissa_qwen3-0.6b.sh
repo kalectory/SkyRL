@@ -6,15 +6,8 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/pissa/run_megatron_pissa_qwen3-0.6b.sh
 
-PISSA_INIT_DIR="${PISSA_INIT_DIR:?Set PISSA_INIT_DIR to the PiSSA producer output directory}"
-
-mapfile -t PISSA_VALUES < <(
-  uv run python -c \
-    'import json, sys; m = json.load(open(sys.argv[1])); print(m["source_model"]); print(m["rank"])' \
-    "$PISSA_INIT_DIR/pissa_init.json"
-)
-SOURCE_MODEL="${PISSA_VALUES[0]}"
-LORA_RANK="${PISSA_VALUES[1]}"
+PISSA_INIT_DIR="${PISSA_INIT_DIR:-$HOME/pissa/qwen3_0.6b_r32}"
+SOURCE_MODEL="Qwen/Qwen3-0.6B"
 MODEL_NAME="$PISSA_INIT_DIR/residual_base"
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=8
@@ -27,6 +20,7 @@ MEGATRON_PP=1
 MEGATRON_CP=1
 
 # LoRA configuration
+LORA_RANK=32
 LORA_ALPHA=$LORA_RANK
 LORA_A_INIT_METHOD="kaiming"
 

@@ -26,17 +26,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _write_manifest(output_dir: Path, base_model: str, rank: int) -> None:
-    manifest = {
-        "schema_version": 1,
-        "source_model": base_model,
-        "rank": rank,
-    }
-    with (output_dir / "pissa_init.json").open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-        f.write("\n")
-
-
 def main() -> None:
     args = _parse_args()
 
@@ -96,7 +85,6 @@ def main() -> None:
                 tokenizer,
             )
         )
-        _write_manifest(args.output_dir, args.base_model, args.rank)
         logger.info(f"PiSSA initialization artifacts saved to {args.output_dir}")
     finally:
         if ray.is_initialized():
