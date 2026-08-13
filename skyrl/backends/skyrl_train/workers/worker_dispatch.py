@@ -462,6 +462,14 @@ class WorkerDispatch:
 
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "save_hf_model", export_dir, tokenizer))
 
+    def save_pissa_residual(self, model: str, export_dir: str, tokenizer, model_id: str) -> None:
+        """Export the residual base from an initialized Megatron PiSSA model."""
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
+        self.ensure_active_adapter(model, model_id)
+        ray.get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "save_pissa_residual", export_dir, tokenizer)
+        )
+
     def init_model(self, model: str, model_path: str, num_training_steps: Optional[int] = None) -> None:
         """Initialize model from path. Offloads others in colocation group first."""
         # Offload others in colocation group before init

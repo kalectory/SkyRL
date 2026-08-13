@@ -58,7 +58,7 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 )
 from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
     pissa_pre_wrap_hook,
-    validate_pissa_producer_config,
+    validate_pissa_config,
     zeroed_adapters,
 )
 from skyrl.backends.skyrl_train.workers.worker import (
@@ -442,7 +442,7 @@ class MegatronWorker:
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         # TODO: Pass "pissa" directly once Megatron Bridge supports it.
-        lora_a_init_method = "kaiming" if lora_config.init_method == "pissa" else lora_config.init_method
+        lora_a_init_method = "kaiming" if self._is_pissa else lora_config.init_method
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
@@ -694,22 +694,34 @@ class MegatronWorker:
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
-        lora_config = self.cfg.policy.model.lora
-        if lora_config.export_residual_base:
-            with zeroed_adapters(self.model.actor_module):
-                self.strategy.save_hf_model(
-                    self.bridge,
-                    self.model,
-                    export_dir,
-                    tokenizer=tokenizer,
-                )
-            return
         self.strategy.save_hf_model(
             self.bridge,
             self.model,
             export_dir,
             tokenizer=tokenizer,
         )
+
+    def enable_pissa_init(self) -> None:
+        """Enable PiSSA decomposition before this worker constructs its model."""
+        if self.actor_module is not None:
+            raise RuntimeError("PiSSA initialization must be enabled before model construction")
+        validate_pissa_config(
+            self.cfg.policy.model.lora.rank,
+            self.cfg.policy.megatron_config.lora_config.lora_type,
+        )
+        self._is_pissa = True
+
+    def save_pissa_residual(self, export_dir: str, tokenizer) -> None:
+        """Export the frozen residual base from an initialized PiSSA model."""
+        if not self._is_pissa:
+            raise RuntimeError("PiSSA initialization is not enabled")
+        with zeroed_adapters(self.model.actor_module):
+            self.strategy.save_hf_model(
+                self.bridge,
+                self.model,
+                export_dir,
+                tokenizer=tokenizer,
+            )
 
     def _get_module_for_offload(self):
         # The underlying offloadable module is `self.actor_module` instead of `self.model`.
@@ -724,15 +736,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
-        lora_config = self.cfg.policy.model.lora
-        megatron_lora_config = self.cfg.policy.megatron_config.lora_config
-        self._is_pissa = validate_pissa_producer_config(
-            lora_config.init_method,
-            lora_config.export_residual_base,
-            megatron_lora_config.merge_lora,
-            lora_config.rank,
-            megatron_lora_config.lora_type,
-        )
+        self._is_pissa = False
         self._is_lora = self.cfg.policy.model.lora.rank > 0
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.

@@ -87,10 +87,8 @@ class SkyRLLoraConfig(BaseConfig):
     target_modules: str = "all-linear"
     exclude_modules: Optional[str] = None
     init_method: str = "kaiming"
-    """LoRA initialization method; ``pissa`` is Megatron producer-only."""
-
-    export_residual_base: bool = False
-    """Export PiSSA's frozen residual from a Megatron producer."""
+    """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
+    For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a

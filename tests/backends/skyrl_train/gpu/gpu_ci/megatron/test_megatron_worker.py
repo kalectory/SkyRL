@@ -379,13 +379,14 @@ async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
         cfg.trainer.bf16 = False
         return cfg
 
-    def megatron_forward(cfg):
+    def megatron_forward(cfg, setup_method=None):
         actor_group = init_worker_with_type(
             "policy",
             shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
+            setup_method=setup_method,
         )
         all_rank = ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch))
         output = WorkerOutput.cat(actor_group.actor_infos, all_rank)
@@ -395,10 +396,8 @@ async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
     pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(
         rank=32,
         alpha=32,
-        init_method="pissa",
-        export_residual_base=True,
     )
-    logprobs_pissa = megatron_forward(pissa_cfg)
+    logprobs_pissa = megatron_forward(pissa_cfg, setup_method="enable_pissa_init")
 
     ray.shutdown()
     ray_init_for_tests()

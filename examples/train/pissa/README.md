@@ -1,50 +1,30 @@
 # PiSSA with Megatron
 
-PiSSA training uses two endpoints. The producer decomposes the original model once and writes a paired residual base and Megatron checkpoint. Training then uses the residual base with ordinary LoRA initialization and loads the checkpoint before its first update or sample.
+PiSSA initialization is an offline step. It writes a Hugging Face residual model and a standard SkyRL step-zero checkpoint containing the initialized adapter and optimizer state.
 
-## Produce the artifacts
-
-Start the producer:
+Prepare GSM8K, then produce the initialization artifacts:
 
 ```bash
-bash examples/train/pissa/run_qwen2_5_0.5b_megatron_pissa_producer.sh
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir "$HOME/data/gsm8k"
+PISSA_INIT_DIR="$HOME/pissa/qwen2_5_0.5b_r32" \
+  bash examples/train/pissa/run_qwen2_5_0.5b_megatron_pissa_producer.sh
 ```
 
-Create a model and save both outputs with a Tinker client:
+The producer creates:
 
-```python
-import tinker
-
-service_client = tinker.ServiceClient(base_url="http://localhost:8000", api_key="tml-dummy")
-training_client = service_client.create_lora_training_client(
-    base_model="Qwen/Qwen2.5-0.5B-Instruct",
-    rank=32,
-)
-adapter_checkpoint = training_client.save_state("pissa_adapter").result().path
-residual_base = training_client.save_weights_for_sampler("pissa_residual_base").result().path
-print(adapter_checkpoint, residual_base)
+```text
+pissa_init.json
+residual_base/
+global_step_0/
 ```
 
-Publish or mount the residual-base export where it can be used as a model path. Keep the adapter checkpoint in a checkpoint store visible to the training endpoint.
-
-## Train from the artifacts
-
-Start the training endpoint with the published residual model:
+Start training from those artifacts:
 
 ```bash
-PISSA_RESIDUAL_MODEL=/path/to/pissa_residual_base \
+PISSA_INIT_DIR="$HOME/pissa/qwen2_5_0.5b_r32" \
   bash examples/train/pissa/run_qwen2_5_0.5b_megatron_pissa.sh
 ```
 
-The training client uses the normal checkpoint-resume path:
+The launcher reads the source model and LoRA rank from `pissa_init.json`, prints the resolved values, and then appends any additional arguments. User arguments therefore override its defaults. The policy loads the residual model and resumes the initialized adapter from `global_step_0`; the frozen KL reference loads the original source model.
 
-```python
-service_client = tinker.ServiceClient(base_url="http://localhost:8000", api_key="tml-dummy")
-training_client = service_client.create_lora_training_client(
-    base_model="/path/to/pissa_residual_base",
-    rank=32,
-)
-training_client.load_state(adapter_checkpoint)
-```
-
-Do not set `init_method=pissa` on the training endpoint. Its default Kaiming adapter is only a correctly shaped container; `load_state` replaces it before training or sampling. The residual base and checkpoint must use the same source model, rank, alpha, and target modules.
+PiSSA uses `alpha=rank`, `target_modules=all-linear`, and no exclusions. Training may use either Megatron weight-sync mode; the example defaults to `merge_lora=false`.

@@ -1,5 +1,6 @@
 """Tests for PiSSA decomposition and tensor-parallel initialization."""
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.workers.megatron import pissa_init
+from skyrl.train.entrypoints.pissa_init import _write_manifest
 from skyrl.utils.pissa import pissa_decompose
 
 
@@ -35,52 +37,46 @@ def test_rank_too_large_raises():
 
 
 @pytest.mark.parametrize(
-    ("init_method", "export_residual_base", "merge_lora", "rank", "lora_type"),
+    ("rank", "lora_type"),
     [
-        ("pissa", False, True, 32, "lora"),
-        ("pissa", True, False, 32, "lora"),
-        ("kaiming", True, True, 32, "lora"),
-        ("pissa_niter_4", True, True, 32, "lora"),
-        ("pissa", True, True, 0, "lora"),
-        ("pissa", True, True, 32, "canonical_lora"),
+        (0, "lora"),
+        (32, "canonical_lora"),
     ],
 )
-def test_invalid_pissa_producer_config_raises(init_method, export_residual_base, merge_lora, rank, lora_type):
+def test_invalid_pissa_config_raises(rank, lora_type):
     with pytest.raises(ValueError):
-        pissa_init.validate_pissa_producer_config(
-            init_method,
-            export_residual_base,
-            merge_lora,
-            rank,
-            lora_type,
-        )
+        pissa_init.validate_pissa_config(rank, lora_type)
 
 
-@pytest.mark.parametrize(
-    ("init_method", "export_residual_base", "merge_lora", "rank", "lora_type", "expected"),
-    [
-        ("kaiming", False, False, 32, "canonical_lora", False),
-        ("pissa", True, True, 32, "lora", True),
-    ],
-)
-def test_valid_pissa_producer_config_is_identified(
-    init_method,
-    export_residual_base,
-    merge_lora,
-    rank,
-    lora_type,
-    expected,
-):
-    assert (
-        pissa_init.validate_pissa_producer_config(
-            init_method,
-            export_residual_base,
-            merge_lora,
-            rank,
-            lora_type,
+def test_valid_pissa_config_is_accepted():
+    pissa_init.validate_pissa_config(32, "lora")
+
+
+def test_pissa_manifest_records_training_inputs(tmp_path):
+    cfg = SimpleNamespace(
+        trainer=SimpleNamespace(
+            policy=SimpleNamespace(
+                model=SimpleNamespace(
+                    lora=SimpleNamespace(target_modules="all-linear", exclude_modules=None),
+                )
+            )
         )
-        is expected
     )
+
+    _write_manifest(tmp_path, "Qwen/test-model", 32, cfg)
+
+    manifest = json.loads((tmp_path / "pissa_init.json").read_text())
+    assert manifest == {
+        "schema_version": 1,
+        "source_model": "Qwen/test-model",
+        "policy_model_path": "residual_base",
+        "resume_path": "global_step_0",
+        "reference_model": "Qwen/test-model",
+        "rank": 32,
+        "alpha": 32,
+        "target_modules": "all-linear",
+        "exclude_modules": None,
+    }
 
 
 @pytest.mark.parametrize("export_raises", [False, True])
@@ -108,11 +104,10 @@ def test_residual_export_restores_adapter_weights(monkeypatch, export_raises):
     original_device = weight.device
 
     if export_raises:
-        with pytest.raises(RuntimeError):
-            with pissa_init.zeroed_adapters(model):
-                torch.testing.assert_close(weight, torch.zeros_like(weight))
-                assert weight.device == original_device
-                raise RuntimeError("export failed")
+        with pytest.raises(RuntimeError), pissa_init.zeroed_adapters(model):
+            torch.testing.assert_close(weight, torch.zeros_like(weight))
+            assert weight.device == original_device
+            raise RuntimeError("export failed")
     else:
         with pissa_init.zeroed_adapters(model):
             torch.testing.assert_close(weight, torch.zeros_like(weight))
