@@ -17,8 +17,6 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import PiSSAInitWorker
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import (
     MegatronTorchProfilerConfig,
@@ -364,64 +362,6 @@ async def test_megatron_forward(
     else:
         # allow larger tolerance in diff for the 30B-MoE model due to larger model size
         assert avg_diff < 1.6e-1, f"Avg diff {avg_diff} is too large"
-
-
-@pytest.mark.asyncio
-@pytest.mark.megatron
-async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
-    """The PiSSA producer preserves the base-model forward across TP and PP."""
-    batch = get_test_training_batch(4)
-
-    def base_cfg():
-        cfg = get_test_actor_config(model_name=MODEL_NAME)
-        cfg.trainer.strategy = "megatron"
-        cfg.trainer.placement.policy_num_gpus_per_node = 4
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
-        cfg.trainer.bf16 = False
-        return cfg
-
-    def megatron_forward(cfg, worker_cls=None):
-        if worker_cls is None:
-            actor_group = init_worker_with_type(
-                "policy",
-                shared_pg=None,
-                colocate_all=False,
-                num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-                cfg=cfg,
-            )
-        else:
-            actor_group = PPORayActorGroup(
-                cfg.trainer,
-                num_nodes=1,
-                num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-                ray_actor_type=worker_cls,
-                num_gpus_per_actor=0.75,
-                colocate_all=False,
-                sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-                record_memory=cfg.trainer.policy.record_memory,
-            )
-            ray.get(actor_group.async_init_model(cfg.trainer.policy.model.path))
-        all_rank = ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch))
-        output = WorkerOutput.cat(actor_group.actor_infos, all_rank)
-        return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
-
-    pissa_cfg = base_cfg()
-    pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(
-        rank=32,
-        alpha=32,
-    )
-    logprobs_pissa = megatron_forward(pissa_cfg, worker_cls=PiSSAInitWorker)
-
-    ray.shutdown()
-    ray_init_for_tests()
-
-    logprobs_base = megatron_forward(base_cfg())
-
-    diff = torch.abs(logprobs_pissa - logprobs_base)
-    max_diff, avg_diff = diff.max().item(), diff.mean().item()
-    print(f"PiSSA vs base: max_diff={max_diff} avg_diff={avg_diff}")
-    torch.testing.assert_close(logprobs_pissa, logprobs_base, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.asyncio

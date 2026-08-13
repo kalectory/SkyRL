@@ -1,4 +1,4 @@
-"""Tensor-parallel PiSSA initialization for Megatron LoRA adapters."""
+"""Megatron worker for offline PiSSA initialization."""
 
 import contextlib
 import math
