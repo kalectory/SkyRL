@@ -58,6 +58,7 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 )
 from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
     pissa_pre_wrap_hook,
+    validate_pissa_producer_config,
     zeroed_adapters,
 )
 from skyrl.backends.skyrl_train.workers.worker import (
@@ -496,7 +497,6 @@ class MegatronWorker:
         )
 
         if lora_config is not None:
-            is_pissa = lora_config.init_method == "pissa"
             self.configure_lora(lora_config, lora_type)
 
             def lora_pre_wrap_hook(model):
@@ -506,7 +506,7 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-            if is_pissa:
+            if self._is_pissa:
                 self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
 
         default_ddp_config = DistributedDataParallelConfig()
@@ -695,7 +695,7 @@ class MegatronWorker:
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         lora_config = self.cfg.policy.model.lora
-        if lora_config.export_residual_base and lora_config.init_method == "pissa":
+        if lora_config.export_residual_base:
             with zeroed_adapters(self.model.actor_module):
                 self.strategy.save_hf_model(
                     self.bridge,
@@ -724,6 +724,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
+        lora_config = self.cfg.policy.model.lora
+        megatron_lora_config = self.cfg.policy.megatron_config.lora_config
+        self._is_pissa = validate_pissa_producer_config(
+            lora_config.init_method,
+            lora_config.export_residual_base,
+            megatron_lora_config.merge_lora,
+            lora_config.rank,
+            megatron_lora_config.lora_type,
+        )
         self._is_lora = self.cfg.policy.model.lora.rank > 0
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.

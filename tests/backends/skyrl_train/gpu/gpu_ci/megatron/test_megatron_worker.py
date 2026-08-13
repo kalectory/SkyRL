@@ -366,8 +366,8 @@ async def test_megatron_forward(
 
 @pytest.mark.asyncio
 @pytest.mark.megatron
-async def test_megatron_pissa_identity_at_init(ray_init_fixture):
-    """PiSSA initialization preserves the base-model forward across TP and PP."""
+async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
+    """The PiSSA producer preserves the base-model forward across TP and PP."""
     batch = get_test_training_batch(4)
 
     def base_cfg():
@@ -392,7 +392,12 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture):
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
     pissa_cfg = base_cfg()
-    pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32, init_method="pissa")
+    pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(
+        rank=32,
+        alpha=32,
+        init_method="pissa",
+        export_residual_base=True,
+    )
     logprobs_pissa = megatron_forward(pissa_cfg)
 
     ray.shutdown()

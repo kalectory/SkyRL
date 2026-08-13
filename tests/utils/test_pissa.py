@@ -1,6 +1,7 @@
 """Tests for PiSSA decomposition and tensor-parallel initialization."""
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -31,6 +32,93 @@ def test_rank_too_large_raises():
     w = torch.randn(8, 12)
     with pytest.raises(ValueError):
         pissa_decompose(w, 9, 1.0)  # 9 > min(8, 12)
+
+
+@pytest.mark.parametrize(
+    ("init_method", "export_residual_base", "merge_lora", "rank", "lora_type"),
+    [
+        ("pissa", False, True, 32, "lora"),
+        ("pissa", True, False, 32, "lora"),
+        ("kaiming", True, True, 32, "lora"),
+        ("pissa_niter_4", True, True, 32, "lora"),
+        ("pissa", True, True, 0, "lora"),
+        ("pissa", True, True, 32, "canonical_lora"),
+    ],
+)
+def test_invalid_pissa_producer_config_raises(init_method, export_residual_base, merge_lora, rank, lora_type):
+    with pytest.raises(ValueError):
+        pissa_init.validate_pissa_producer_config(
+            init_method,
+            export_residual_base,
+            merge_lora,
+            rank,
+            lora_type,
+        )
+
+
+@pytest.mark.parametrize(
+    ("init_method", "export_residual_base", "merge_lora", "rank", "lora_type", "expected"),
+    [
+        ("kaiming", False, False, 32, "canonical_lora", False),
+        ("pissa", True, True, 32, "lora", True),
+    ],
+)
+def test_valid_pissa_producer_config_is_identified(
+    init_method,
+    export_residual_base,
+    merge_lora,
+    rank,
+    lora_type,
+    expected,
+):
+    assert (
+        pissa_init.validate_pissa_producer_config(
+            init_method,
+            export_residual_base,
+            merge_lora,
+            rank,
+            lora_type,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("export_raises", [False, True])
+def test_residual_export_restores_adapter_weights(monkeypatch, export_raises):
+    class ParallelLinearAdapter(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear_out = torch.nn.Linear(3, 4, bias=False)
+
+    class LoRALinear(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.adapter = ParallelLinearAdapter()
+
+    lora_layers = ModuleType("megatron.bridge.peft.lora_layers")
+    lora_layers.LoRALinear = LoRALinear
+    peft_utils = ModuleType("megatron.bridge.peft.utils")
+    peft_utils.ParallelLinearAdapter = ParallelLinearAdapter
+    monkeypatch.setitem(sys.modules, "megatron.bridge.peft.lora_layers", lora_layers)
+    monkeypatch.setitem(sys.modules, "megatron.bridge.peft.utils", peft_utils)
+
+    model = torch.nn.Sequential(LoRALinear())
+    weight = model[0].adapter.linear_out.weight
+    original = weight.detach().clone()
+    original_device = weight.device
+
+    if export_raises:
+        with pytest.raises(RuntimeError):
+            with pissa_init.zeroed_adapters(model):
+                torch.testing.assert_close(weight, torch.zeros_like(weight))
+                assert weight.device == original_device
+                raise RuntimeError("export failed")
+    else:
+        with pissa_init.zeroed_adapters(model):
+            torch.testing.assert_close(weight, torch.zeros_like(weight))
+            assert weight.device == original_device
+
+    torch.testing.assert_close(weight, original)
 
 
 @pytest.mark.parametrize("input_is_parallel", [False, True], ids=["column_parallel", "row_parallel"])

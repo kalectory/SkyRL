@@ -7,6 +7,29 @@ import torch
 from skyrl.utils.pissa import pissa_decompose
 
 
+def validate_pissa_producer_config(
+    init_method: str,
+    export_residual_base: bool,
+    merge_lora: bool,
+    rank: int,
+    lora_type: str,
+) -> bool:
+    """Validate producer-only PiSSA settings and return whether PiSSA is enabled."""
+    if init_method.startswith("pissa") and init_method != "pissa":
+        raise ValueError("PiSSA supports only exact init_method='pissa'")
+
+    is_pissa = init_method == "pissa"
+    if is_pissa != export_residual_base:
+        raise ValueError("init_method='pissa' and export_residual_base=true must be set together")
+    if is_pissa and not merge_lora:
+        raise ValueError("PiSSA producers require merge_lora=true")
+    if is_pissa and rank <= 0:
+        raise ValueError("PiSSA producers require a positive LoRA rank")
+    if is_pissa and lora_type != "lora":
+        raise ValueError("PiSSA producers support only lora_type='lora'")
+    return is_pissa
+
+
 @contextlib.contextmanager
 def zeroed_adapters(model_chunks):
     """Temporarily zero LoRA B matrices for residual-base export."""
