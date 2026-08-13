@@ -70,30 +70,14 @@ def test_valid_pissa_config_is_accepted():
     pissa_init_worker.validate_pissa_config(32, "lora")
 
 
-def test_pissa_manifest_records_training_inputs(tmp_path):
-    cfg = SimpleNamespace(
-        trainer=SimpleNamespace(
-            policy=SimpleNamespace(
-                model=SimpleNamespace(
-                    lora=SimpleNamespace(target_modules="all-linear", exclude_modules=None),
-                )
-            )
-        )
-    )
-
-    _write_manifest(tmp_path, "Qwen/test-model", 32, cfg)
+def test_pissa_manifest_records_source_model_and_rank(tmp_path):
+    _write_manifest(tmp_path, "Qwen/test-model", 32)
 
     manifest = json.loads((tmp_path / "pissa_init.json").read_text())
     assert manifest == {
         "schema_version": 1,
         "source_model": "Qwen/test-model",
-        "policy_model_path": "residual_base",
-        "resume_path": "global_step_0",
-        "reference_model": "Qwen/test-model",
         "rank": 32,
-        "alpha": 32,
-        "target_modules": "all-linear",
-        "exclude_modules": None,
     }
 
 

@@ -26,18 +26,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _write_manifest(output_dir: Path, base_model: str, rank: int, cfg) -> None:
-    lora = cfg.trainer.policy.model.lora
+def _write_manifest(output_dir: Path, base_model: str, rank: int) -> None:
     manifest = {
         "schema_version": 1,
         "source_model": base_model,
-        "policy_model_path": "residual_base",
-        "resume_path": "global_step_0",
-        "reference_model": base_model,
         "rank": rank,
-        "alpha": rank,
-        "target_modules": lora.target_modules,
-        "exclude_modules": lora.exclude_modules,
     }
     with (output_dir / "pissa_init.json").open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -103,7 +96,7 @@ def main() -> None:
                 tokenizer,
             )
         )
-        _write_manifest(args.output_dir, args.base_model, args.rank, cfg)
+        _write_manifest(args.output_dir, args.base_model, args.rank)
         logger.info(f"PiSSA initialization artifacts saved to {args.output_dir}")
     finally:
         if ray.is_initialized():
