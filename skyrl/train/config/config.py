@@ -87,7 +87,7 @@ class SkyRLLoraConfig(BaseConfig):
     target_modules: str = "all-linear"
     exclude_modules: Optional[str] = None
     init_method: str = "kaiming"
-    """LoRA initialization method, including ``pissa`` and ``pissa_niter_<N>``."""
+    """LoRA initialization method, including ``pissa``."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a

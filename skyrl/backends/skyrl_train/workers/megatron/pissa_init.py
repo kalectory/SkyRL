@@ -5,11 +5,11 @@ import torch
 from skyrl.utils.pissa import pissa_decompose
 
 
-def pissa_pre_wrap_hook(niter: int):
+def pissa_pre_wrap_hook():
     """Build a pre-wrap hook that applies PiSSA after the LoRA transform."""
 
     def hook(model):
-        apply_pissa_init(model, niter)
+        apply_pissa_init(model)
         return model
 
     return hook
@@ -35,7 +35,7 @@ def _shard(full: torch.Tensor, dim: int, tp_rank: int, tp_size: int) -> torch.Te
 
 
 @torch.no_grad()
-def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group, niter: int) -> None:
+def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group) -> None:
     base_weight = base_linear.weight
     if base_weight.is_meta:
         raise RuntimeError(
@@ -53,7 +53,7 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
     else:
         full_w = _all_gather(base_weight.data.float(), base_shard_dim, tp_size, tp_group)
 
-    linear_in_full, linear_out_full, residual_full = pissa_decompose(full_w, rank, scale, niter)
+    linear_in_full, linear_out_full, residual_full = pissa_decompose(full_w, rank, scale)
 
     lin_in_shard_dim = 1 if input_is_parallel else 0
     base_dtype = base_weight.dtype
@@ -65,7 +65,7 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
 
 
 @torch.no_grad()
-def apply_pissa_init(model_chunks, niter: int) -> None:
+def apply_pissa_init(model_chunks) -> None:
     """Overwrite supported Megatron LoRA adapters with PiSSA factors."""
     import megatron.core.parallel_state as mpu
     from loguru import logger
@@ -95,6 +95,6 @@ def apply_pissa_init(model_chunks, niter: int) -> None:
         raise ValueError("PiSSA found no supported LoRA adapters")
 
     for base_linear, adapter in adapters:
-        _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group, niter)
+        _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group)
 
-    logger.info(f"PiSSA(niter={niter}): initialized {len(adapters)} LoRA adapter(s)")
+    logger.info(f"PiSSA: initialized {len(adapters)} LoRA adapter(s)")

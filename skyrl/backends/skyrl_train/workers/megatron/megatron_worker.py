@@ -73,7 +73,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
-from skyrl.utils.pissa import parse_pissa_init_method
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
@@ -493,8 +492,8 @@ class MegatronWorker:
         )
 
         if lora_config is not None:
-            pissa_niter = parse_pissa_init_method(lora_config.init_method)
-            if pissa_niter is not None:
+            is_pissa = lora_config.init_method == "pissa"
+            if is_pissa:
                 self.configure_lora(lora_config, lora_type, "kaiming")
             else:
                 self.configure_lora(lora_config, lora_type)
@@ -506,8 +505,8 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-            if pissa_niter is not None:
-                self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook(pissa_niter))
+            if is_pissa:
+                self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:

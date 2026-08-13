@@ -8,7 +8,6 @@ import torch
 from skyrl.backends.skyrl_train.workers.megatron import pissa_init
 from skyrl.utils.pissa import (
     materialize_pissa,
-    parse_pissa_init_method,
     pissa_decompose,
 )
 
@@ -37,23 +36,6 @@ def test_rank_too_large_raises():
         pissa_decompose(w, 9, 1.0)  # 9 > min(8, 12)
 
 
-def test_parse_pissa_init_method():
-    assert parse_pissa_init_method("pissa") == 0
-    assert parse_pissa_init_method("pissa_niter_4") == 4
-    assert parse_pissa_init_method("kaiming") is None
-
-
-def test_niter_reconstructs_weight():
-    torch.manual_seed(5)
-    out, in_, rank = 64, 48, 8
-    base = (torch.randn(out, rank) * torch.arange(rank, 0, -1).float()) @ torch.randn(rank, in_)
-    w = base + 0.01 * torch.randn(out, in_)
-    linear_in, linear_out, residual = pissa_decompose(w, rank, 1.0, niter=8)
-    assert linear_in.shape == (rank, in_) and linear_out.shape == (out, rank)
-    merged = residual + 1.0 * (linear_out @ linear_in)
-    torch.testing.assert_close(merged, w, atol=3e-6, rtol=1e-6)
-
-
 @pytest.mark.parametrize("input_is_parallel", [False, True], ids=["column_parallel", "row_parallel"])
 @pytest.mark.parametrize("tp_rank", [0, 1])
 def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_parallel, tp_rank):
@@ -77,7 +59,7 @@ def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_p
     )
     monkeypatch.setattr(pissa_init, "_all_gather", lambda *args: full_weight)
 
-    pissa_init._init_one_adapter(base_linear, adapter, tp_size, tp_rank, None, niter=0)
+    pissa_init._init_one_adapter(base_linear, adapter, tp_size, tp_rank, None)
 
     linear_in, linear_out, residual = pissa_decompose(full_weight, rank, scale=1.0)
     torch.testing.assert_close(base_linear.weight, residual.chunk(tp_size, dim=base_shard_dim)[tp_rank])
