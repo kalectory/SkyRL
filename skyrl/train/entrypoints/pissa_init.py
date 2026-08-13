@@ -61,9 +61,6 @@ def main() -> None:
             "trainer.policy.model.lora.target_modules": "all-linear",
             "trainer.policy.model.lora.exclude_modules": None,
             "trainer.placement.colocate_all": False,
-            "trainer.algorithm.use_kl_loss": False,
-            "trainer.policy.optimizer_config.scheduler": "constant_with_warmup",
-            "trainer.policy.optimizer_config.num_warmup_steps": 0,
         }
     )
     cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
