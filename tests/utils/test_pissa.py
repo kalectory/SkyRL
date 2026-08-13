@@ -1,4 +1,4 @@
-"""Tests for PiSSA decomposition and offline materialization."""
+"""Tests for PiSSA decomposition and tensor-parallel initialization."""
 
 from types import SimpleNamespace
 
@@ -6,10 +6,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.workers.megatron import pissa_init
-from skyrl.utils.pissa import (
-    materialize_pissa,
-    pissa_decompose,
-)
+from skyrl.utils.pissa import pissa_decompose
 
 
 def _principal(weight, rank):
@@ -65,35 +62,3 @@ def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_p
     torch.testing.assert_close(base_linear.weight, residual.chunk(tp_size, dim=base_shard_dim)[tp_rank])
     torch.testing.assert_close(adapter.linear_in.weight, linear_in.chunk(tp_size, dim=linear_in_shard_dim)[tp_rank])
     torch.testing.assert_close(adapter.linear_out.weight, linear_out.chunk(tp_size, dim=0)[tp_rank])
-
-
-def test_materialize_pissa_is_identity_at_init(tmp_path):
-    pytest.importorskip("peft")
-    transformers = pytest.importorskip("transformers")
-    from peft import PeftModel
-    from transformers import AutoModelForCausalLM
-
-    config = transformers.LlamaConfig(
-        hidden_size=32,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=1,
-        vocab_size=128,
-    )
-    torch.manual_seed(0)
-    model = transformers.LlamaForCausalLM(config).eval()
-    src = str(tmp_path / "src")
-    model.save_pretrained(src)
-
-    ids = torch.randint(0, 128, (1, 8))
-    with torch.no_grad():
-        ref = model(ids).logits
-
-    base_dir, adapter_dir = materialize_pissa(src, rank=8, out_dir=str(tmp_path / "out"), dtype="float32")
-
-    base = AutoModelForCausalLM.from_pretrained(base_dir, torch_dtype=torch.float32)
-    reconstructed = PeftModel.from_pretrained(base, adapter_dir).eval()
-    with torch.no_grad():
-        out = reconstructed(ids).logits
-    torch.testing.assert_close(out, ref, atol=1e-6, rtol=1e-6)

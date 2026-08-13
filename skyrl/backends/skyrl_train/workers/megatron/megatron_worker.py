@@ -56,7 +56,10 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
+    pissa_pre_wrap_hook,
+    zeroed_adapters,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -691,6 +694,16 @@ class MegatronWorker:
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
+        lora_config = self.cfg.policy.model.lora
+        if lora_config.export_residual_base and lora_config.init_method == "pissa":
+            with zeroed_adapters(self.model.actor_module):
+                self.strategy.save_hf_model(
+                    self.bridge,
+                    self.model,
+                    export_dir,
+                    tokenizer=tokenizer,
+                )
+            return
         self.strategy.save_hf_model(
             self.bridge,
             self.model,

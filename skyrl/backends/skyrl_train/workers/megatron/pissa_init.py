@@ -1,8 +1,33 @@
 """Tensor-parallel PiSSA initialization for Megatron LoRA adapters."""
 
+import contextlib
+
 import torch
 
 from skyrl.utils.pissa import pissa_decompose
+
+
+@contextlib.contextmanager
+def zeroed_adapters(model_chunks):
+    """Temporarily zero LoRA B matrices for residual-base export."""
+    from megatron.bridge.peft.lora_layers import LoRALinear
+    from megatron.bridge.peft.utils import ParallelLinearAdapter
+
+    chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
+    saved = []
+    with torch.no_grad():
+        for chunk in chunks:
+            for module in chunk.modules():
+                if isinstance(module, LoRALinear) and isinstance(module.adapter, ParallelLinearAdapter):
+                    weight = module.adapter.linear_out.weight
+                    saved.append((weight, weight.detach().clone()))
+                    weight.zero_()
+    try:
+        yield
+    finally:
+        with torch.no_grad():
+            for weight, original in saved:
+                weight.copy_(original)
 
 
 def pissa_pre_wrap_hook():
