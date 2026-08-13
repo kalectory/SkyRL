@@ -100,20 +100,24 @@ def apply_pissa_init(model_chunks, config: PissaConfig) -> None:
     tp_group = mpu.get_tensor_model_parallel_group()
 
     chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
-    initialized = 0
-    skipped = 0
+    adapters = []
+    unsupported = []
     for chunk in chunks:
         for module in chunk.modules():
             if not isinstance(module, LoRALinear):
                 continue
-            adapter = module.adapter
-            if not isinstance(adapter, ParallelLinearAdapter):
-                skipped += 1
-                continue
-            _init_one_adapter(module.to_wrap, adapter, tp_size, tp_rank, tp_group, config.niter)
-            initialized += 1
+            if isinstance(module.adapter, ParallelLinearAdapter):
+                adapters.append((module.to_wrap, module.adapter))
+            else:
+                unsupported.append(type(module.adapter).__name__)
 
-    logger.info(
-        f"PiSSA(niter={config.niter}): initialized {initialized} LoRA adapter(s) "
-        f"(skipped {skipped} non-parallel/expert adapter(s))"
-    )
+    if unsupported:
+        adapter_types = ", ".join(sorted(set(unsupported)))
+        raise ValueError(f"PiSSA does not support adapter types: {adapter_types}")
+    if not adapters:
+        raise ValueError("PiSSA found no supported LoRA adapters")
+
+    for base_linear, adapter in adapters:
+        _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group, config.niter)
+
+    logger.info(f"PiSSA(niter={config.niter}): initialized {len(adapters)} LoRA adapter(s)")

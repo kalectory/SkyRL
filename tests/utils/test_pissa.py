@@ -1,10 +1,12 @@
 """Tests for PiSSA decomposition and offline materialization."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.workers.megatron import pissa_init
 from skyrl.utils.pissa import PissaConfig, materialize_pissa, pissa_decompose
 
 
@@ -26,7 +28,7 @@ def test_residual_plus_adapter_reconstructs_weight(shape, rank):
     assert residual.shape == tuple(shape)
 
     merged = residual + scale * (linear_out @ linear_in)
-    assert torch.allclose(merged, w, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(merged, w, atol=1e-6, rtol=1e-6)
 
 
 @pytest.mark.parametrize("rank", [1, 8, 30])
@@ -37,8 +39,8 @@ def test_adapter_equals_principal_components(rank):
     linear_in, linear_out, residual = pissa_decompose(w, rank, scale)
 
     principal = scale * (linear_out @ linear_in)
-    assert torch.allclose(principal, _principal(w, rank), atol=1e-4, rtol=1e-4)
-    assert torch.allclose(residual, w - _principal(w, rank), atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(principal, _principal(w, rank), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(residual, w - _principal(w, rank), atol=1e-6, rtol=1e-6)
 
 
 @pytest.mark.parametrize("alpha,rank", [(8, 16), (32, 16), (16, 16)])
@@ -49,15 +51,15 @@ def test_scale_invariance(alpha, rank):
     linear_in, linear_out, residual = pissa_decompose(w, rank, scale)
 
     merged = residual + scale * (linear_out @ linear_in)
-    assert torch.allclose(merged, w, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(scale * (linear_out @ linear_in), _principal(w, rank), atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(merged, w, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(scale * (linear_out @ linear_in), _principal(w, rank), atol=1e-6, rtol=1e-6)
 
 
 def test_full_rank_residual_is_zero():
     torch.manual_seed(3)
     w = torch.randn(20, 20)
     _, _, residual = pissa_decompose(w, 20, 1.0)
-    assert torch.allclose(residual, torch.zeros_like(residual), atol=1e-4)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-5, rtol=1e-5)
 
 
 def test_rank_too_large_raises():
@@ -73,8 +75,8 @@ def test_factor_symmetry():
     linear_in, linear_out, _ = pissa_decompose(w, rank, 1.0)
     u, s, vh = torch.linalg.svd(w.float(), full_matrices=False)
     expected = s[:rank].sqrt()
-    assert torch.allclose(linear_out.norm(dim=0), expected, atol=1e-4)
-    assert torch.allclose(linear_in.norm(dim=1), expected, atol=1e-4)
+    torch.testing.assert_close(linear_out.norm(dim=0), expected, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(linear_in.norm(dim=1), expected, atol=1e-6, rtol=1e-6)
     assert math.isclose(linear_out.norm().item(), linear_in.norm().item(), rel_tol=1e-4)
 
 
@@ -96,7 +98,38 @@ def test_niter_reconstructs_weight():
     linear_in, linear_out, residual = pissa_decompose(w, rank, 1.0, niter=8)
     assert linear_in.shape == (rank, in_) and linear_out.shape == (out, rank)
     merged = residual + 1.0 * (linear_out @ linear_in)
-    assert torch.allclose(merged, w, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(merged, w, atol=3e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("input_is_parallel", [False, True], ids=["column_parallel", "row_parallel"])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_parallel, tp_rank):
+    torch.manual_seed(6)
+    full_weight = torch.randn(12, 8)
+    rank = 4
+    tp_size = 2
+    base_shard_dim = 1 if input_is_parallel else 0
+    linear_in_shard_dim = 1 if input_is_parallel else 0
+    base_weight = full_weight.chunk(tp_size, dim=base_shard_dim)[tp_rank].clone()
+    linear_in_shape = list((rank, full_weight.shape[1]))
+    linear_in_shape[linear_in_shard_dim] //= tp_size
+
+    base_linear = SimpleNamespace(weight=torch.nn.Parameter(base_weight))
+    adapter = SimpleNamespace(
+        input_is_parallel=input_is_parallel,
+        dim=rank,
+        alpha=rank,
+        linear_in=SimpleNamespace(weight=torch.nn.Parameter(torch.empty(linear_in_shape))),
+        linear_out=SimpleNamespace(weight=torch.nn.Parameter(torch.empty(full_weight.shape[0] // tp_size, rank))),
+    )
+    monkeypatch.setattr(pissa_init, "_all_gather", lambda *args: full_weight)
+
+    pissa_init._init_one_adapter(base_linear, adapter, tp_size, tp_rank, None, niter=0)
+
+    linear_in, linear_out, residual = pissa_decompose(full_weight, rank, scale=1.0)
+    torch.testing.assert_close(base_linear.weight, residual.chunk(tp_size, dim=base_shard_dim)[tp_rank])
+    torch.testing.assert_close(adapter.linear_in.weight, linear_in.chunk(tp_size, dim=linear_in_shard_dim)[tp_rank])
+    torch.testing.assert_close(adapter.linear_out.weight, linear_out.chunk(tp_size, dim=0)[tp_rank])
 
 
 def test_materialize_pissa_is_identity_at_init(tmp_path):
@@ -107,10 +140,10 @@ def test_materialize_pissa_is_identity_at_init(tmp_path):
 
     config = transformers.LlamaConfig(
         hidden_size=32,
-        intermediate_size=64,
+        intermediate_size=128,
         num_hidden_layers=2,
         num_attention_heads=4,
-        num_key_value_heads=4,
+        num_key_value_heads=1,
         vocab_size=128,
     )
     torch.manual_seed(0)
@@ -128,4 +161,4 @@ def test_materialize_pissa_is_identity_at_init(tmp_path):
     reconstructed = PeftModel.from_pretrained(base, adapter_dir).eval()
     with torch.no_grad():
         out = reconstructed(ids).logits
-    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(out, ref, atol=1e-6, rtol=1e-6)

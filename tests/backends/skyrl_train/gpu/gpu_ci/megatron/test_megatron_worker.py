@@ -376,8 +376,7 @@ async def test_megatron_forward(
 @pytest.mark.megatron
 async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_per_node):
     """PiSSA initialization preserves the base-model forward across TP and PP."""
-    batch = get_test_training_batch(max(4, gpus_per_node))
-    num_actions = batch.metadata["response_length"]
+    batch = get_test_training_batch(4)
 
     def base_cfg():
         cfg = get_test_actor_config(model_name=MODEL_NAME)
@@ -385,6 +384,7 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_pe
         cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.bf16 = False
         return cfg
 
     def megatron_forward(cfg):
@@ -400,7 +400,7 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_pe
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
     pissa_cfg = base_cfg()
-    pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16, init_method="pissa")
+    pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32, init_method="pissa")
     logprobs_pissa = megatron_forward(pissa_cfg)
 
     ray.shutdown()
@@ -408,12 +408,10 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_pe
 
     logprobs_base = megatron_forward(base_cfg())
 
-    response_mask = batch["attention_mask"][:, -num_actions:].bool()
-    diff = torch.abs(logprobs_pissa[response_mask] - logprobs_base[response_mask])
+    diff = torch.abs(logprobs_pissa - logprobs_base)
     max_diff, avg_diff = diff.max().item(), diff.mean().item()
     print(f"PiSSA(tp={tp},pp={pp}) vs base: max_diff={max_diff} avg_diff={avg_diff}")
-    assert max_diff < 5e-1, f"PiSSA not identity at init: max_diff {max_diff}"
-    assert avg_diff < 9e-2, f"PiSSA not identity at init: avg_diff {avg_diff}"
+    torch.testing.assert_close(logprobs_pissa, logprobs_base, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.asyncio
