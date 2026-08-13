@@ -218,7 +218,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return sub_batches
 
-    def _build_policy(self, PolicyWorker, model_id: str, initialize_pissa: bool = False):
+    def _build_policy(self, PolicyWorker, model_id: str):
         cfg = self._cfg
         colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
@@ -252,8 +252,6 @@ class SkyRLTrainBackend(AbstractBackend):
         # set to a large number for megatron scheduler init
         # lr will be managed externally via set_lr()
         policy_num_training_steps = 1e9
-        if initialize_pissa:
-            ray.get(policy_model.async_run_ray_method("pass_through", "enable_pissa_init"))
         ray.get(
             policy_model.async_init_model(
                 cfg.trainer.policy.model.path,
@@ -287,68 +285,6 @@ class SkyRLTrainBackend(AbstractBackend):
             self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
-
-    def _initialize_policy_runtime(
-        self,
-        model_id: str,
-        lora_config: types.LoraConfig,
-        initialize_pissa: bool = False,
-    ) -> None:
-        self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
-        if not ray.is_initialized():
-            logger.info("Initializing Ray with runtime environment")
-            initialize_ray(self._cfg)
-
-        self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
-        if self._cfg.trainer.strategy == "fsdp":
-            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
-                PolicyWorker,
-            )
-        elif self._cfg.trainer.strategy == "megatron":
-            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                PolicyWorker,
-            )
-        else:
-            raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-
-        logger.info("Building models.")
-        self._build_policy(PolicyWorker, model_id=model_id, initialize_pissa=initialize_pissa)
-        if lora_config.rank > 0:
-            self._base_lora_signature = self._lora_signature_from(lora_config)
-
-    def create_pissa_model(self, model_id: str, rank: int) -> SkyRLTrainConfig:
-        """Build a Megatron PiSSA model for offline artifact production."""
-        if self._model_ids_to_role:
-            raise RuntimeError("PiSSA artifact production requires an empty backend")
-        if self.config.strategy != "megatron":
-            raise ValueError("PiSSA artifact production requires strategy='megatron'")
-
-        lora_config = types.LoraConfig(
-            rank=rank,
-            alpha=rank,
-            seed=0,
-        )
-        self._initialize_policy_runtime(model_id, lora_config, initialize_pissa=True)
-        self._model_ids_to_role[model_id] = "policy"
-        self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
-        return self._cfg
-
-    def save_checkpoint_directory(self, output_dir: str, model_id: str) -> None:
-        """Save a full training checkpoint without archive packaging."""
-        self._validate_model_state(model_id)
-        role = self._get_role(model_id)
-        self._dispatch.save_checkpoint(
-            model=role,
-            ckpt_dir=output_dir,
-            tokenizer=self._tokenizer,
-            model_id=model_id,
-        )
-
-    def save_pissa_residual(self, output_dir: str, model_id: str) -> None:
-        """Export an initialized PiSSA model's residual base in HF format."""
-        self._validate_model_state(model_id)
-        role = self._get_role(model_id)
-        self._dispatch.save_pissa_residual(role, output_dir, self._tokenizer, model_id)
 
     def _build_critic(self, CriticWorker, lora_config: types.LoraConfig) -> None:
         cfg = self._cfg
@@ -502,7 +438,29 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # First-time setup OR critic creation (existing path).
         if model_role == "policy":
-            self._initialize_policy_runtime(model_id, lora_config)
+            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+
+            if not ray.is_initialized():
+                logger.info("Initializing Ray with runtime environment")
+                initialize_ray(self._cfg)
+
+            self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+
+            if self._cfg.trainer.strategy == "fsdp":
+                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                    PolicyWorker,
+                )
+            elif self._cfg.trainer.strategy == "megatron":
+                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                    PolicyWorker,
+                )
+            else:
+                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+
+            logger.info("Building models.")
+            self._build_policy(PolicyWorker, model_id=model_id)
+            if is_lora:
+                self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
             if model_role in self._model_ids_to_role.values():
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")

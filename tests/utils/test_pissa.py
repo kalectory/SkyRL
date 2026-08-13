@@ -9,7 +9,6 @@ import torch
 
 from skyrl.backends.skyrl_train.workers.megatron import pissa_init
 from skyrl.train.entrypoints.pissa_init import _write_manifest
-from skyrl.utils.pissa import pissa_decompose
 
 
 def _principal(weight, rank):
@@ -23,7 +22,7 @@ def test_pissa_decomposition_uses_principal_components(shape):
     w = torch.randn(*shape)
     rank = 4
     scale = 0.5
-    linear_in, linear_out, residual = pissa_decompose(w, rank, scale)
+    linear_in, linear_out, residual = pissa_init.pissa_decompose(w, rank, scale)
 
     principal = scale * (linear_out @ linear_in)
     torch.testing.assert_close(principal, _principal(w, rank), atol=1e-6, rtol=1e-6)
@@ -33,7 +32,7 @@ def test_pissa_decomposition_uses_principal_components(shape):
 def test_rank_too_large_raises():
     w = torch.randn(8, 12)
     with pytest.raises(ValueError):
-        pissa_decompose(w, 9, 1.0)  # 9 > min(8, 12)
+        pissa_init.pissa_decompose(w, 9, 1.0)  # 9 > min(8, 12)
 
 
 @pytest.mark.parametrize(
@@ -141,7 +140,7 @@ def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_p
 
     pissa_init._init_one_adapter(base_linear, adapter, tp_size, tp_rank, None)
 
-    linear_in, linear_out, residual = pissa_decompose(full_weight, rank, scale=1.0)
+    linear_in, linear_out, residual = pissa_init.pissa_decompose(full_weight, rank, scale=1.0)
     torch.testing.assert_close(base_linear.weight, residual.chunk(tp_size, dim=base_shard_dim)[tp_rank])
     torch.testing.assert_close(adapter.linear_in.weight, linear_in.chunk(tp_size, dim=linear_in_shard_dim)[tp_rank])
     torch.testing.assert_close(adapter.linear_out.weight, linear_out.chunk(tp_size, dim=0)[tp_rank])

@@ -329,6 +329,8 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    _is_pissa = False
+
     def init_configs(
         self,
         model_path,
@@ -441,8 +443,6 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
-        # TODO: Pass "pissa" directly once Megatron Bridge supports it.
-        lora_a_init_method = "kaiming" if self._is_pissa else lora_config.init_method
         if lora_type == "lora":
             self.lora_cls = LoRA(
                 target_modules=(
@@ -453,7 +453,7 @@ class MegatronWorker:
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
-                lora_A_init_method=lora_a_init_method,
+                lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
@@ -476,7 +476,7 @@ class MegatronWorker:
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
                 dropout=lora_config.dropout,
-                lora_A_init_method=lora_a_init_method,
+                lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
             )
@@ -701,6 +701,24 @@ class MegatronWorker:
             tokenizer=tokenizer,
         )
 
+    def _get_module_for_offload(self):
+        # The underlying offloadable module is `self.actor_module` instead of `self.model`.
+        return self.actor_module
+
+
+class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: MegatronModelWrapper = None
+        self.actor_module: List[nn.Module] = None
+        self.scheduler: OptimizerParamScheduler = None
+        self.optimizer: DistributedOptimizer = None
+        self.profiler: Profiler = None
+        self._is_lora = self.cfg.policy.model.lora.rank > 0
+        # Per-worker store of LoRA adapter snapshots. Allocated only for the
+        # LoRA path; FFT runs single-tenant exactly as before.
+        self.adapter_store: Optional[AdapterStore] = AdapterStore() if self._is_lora else None
+
     def enable_pissa_init(self) -> None:
         """Enable PiSSA decomposition before this worker constructs its model."""
         if self.actor_module is not None:
@@ -722,25 +740,6 @@ class MegatronWorker:
                 export_dir,
                 tokenizer=tokenizer,
             )
-
-    def _get_module_for_offload(self):
-        # The underlying offloadable module is `self.actor_module` instead of `self.model`.
-        return self.actor_module
-
-
-class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
-        self.scheduler: OptimizerParamScheduler = None
-        self.optimizer: DistributedOptimizer = None
-        self.profiler: Profiler = None
-        self._is_pissa = False
-        self._is_lora = self.cfg.policy.model.lora.rank > 0
-        # Per-worker store of LoRA adapter snapshots. Allocated only for the
-        # LoRA path; FFT runs single-tenant exactly as before.
-        self.adapter_store: Optional[AdapterStore] = AdapterStore() if self._is_lora else None
 
     def init_worker_process_group(self):
         """

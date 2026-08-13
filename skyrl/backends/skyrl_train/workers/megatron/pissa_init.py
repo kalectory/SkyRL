@@ -1,10 +1,26 @@
 """Tensor-parallel PiSSA initialization for Megatron LoRA adapters."""
 
 import contextlib
+import math
 
 import torch
 
-from skyrl.utils.pissa import pissa_decompose
+
+def pissa_decompose(weight: torch.Tensor, rank: int, scale: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split a weight into exact rank-``rank`` principal factors and a residual."""
+    max_rank = min(weight.shape)
+    if rank > max_rank:
+        raise ValueError(f"PiSSA rank {rank} exceeds maximum rank {max_rank} for weight shape {tuple(weight.shape)}")
+
+    u, s, vh = torch.linalg.svd(weight.float(), full_matrices=False)
+    sqrt_s = s[:rank].sqrt()
+    linear_out = u[:, :rank] * sqrt_s.unsqueeze(0)
+    linear_in = sqrt_s.unsqueeze(1) * vh[:rank, :]
+    factor = math.sqrt(scale)
+    linear_out /= factor
+    linear_in /= factor
+    residual = weight.float() - scale * (linear_out @ linear_in)
+    return linear_in, linear_out, residual
 
 
 def validate_pissa_config(rank: int, lora_type: str) -> None:

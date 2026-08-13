@@ -12,7 +12,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-model", required=True)
     parser.add_argument("--rank", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--backend-config", type=json.loads, default={})
+    parser.add_argument("--config-overrides", type=json.loads, default={})
     return parser.parse_args()
 
 
@@ -40,38 +40,76 @@ def main() -> None:
     import ray
     import torch
 
-    from skyrl.backends.skyrl_train_backend import (
-        MegatronBackendOverrides,
-        SkyRLTrainBackend,
-    )
-    from skyrl.train.config import get_config_as_dict
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+    from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+    from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+    from skyrl.train.utils.utils import initialize_ray
+    from skyrl.utils.tok import get_tokenizer
 
     if args.rank <= 0:
         raise ValueError("--rank must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
-    backend_config = dict(args.backend_config)
-    backend_config.setdefault("trainer.placement.colocate_all", False)
-    if backend_config["trainer.placement.colocate_all"]:
-        raise ValueError("PiSSA artifact production requires trainer.placement.colocate_all=false")
-    overrides = MegatronBackendOverrides.model_validate(backend_config)
-    backend = SkyRLTrainBackend(args.base_model, overrides)
-    model_id = "pissa_init"
+    overrides = dict(args.config_overrides)
+    overrides.update(
+        {
+            "trainer.strategy": "megatron",
+            "trainer.policy.model.path": args.base_model,
+            "trainer.policy.model.lora.rank": args.rank,
+            "trainer.policy.model.lora.alpha": args.rank,
+            "trainer.policy.model.lora.target_modules": "all-linear",
+            "trainer.policy.model.lora.exclude_modules": None,
+            "trainer.placement.colocate_all": False,
+            "trainer.algorithm.use_kl_loss": False,
+            "trainer.policy.optimizer_config.scheduler": "constant_with_warmup",
+            "trainer.policy.optimizer_config.num_warmup_steps": 0,
+        }
+    )
+    cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
+    tokenizer = get_tokenizer(args.base_model)
+
     try:
-        cfg = backend.create_pissa_model(model_id, args.rank)
+        initialize_ray(cfg)
+        policy = PPORayActorGroup(
+            cfg.trainer,
+            cfg.trainer.placement.policy_num_nodes,
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            PolicyWorker,
+            num_gpus_per_actor=1,
+            colocate_all=False,
+            sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+            record_memory=cfg.trainer.policy.record_memory,
+        )
+        ray.get(policy.async_run_ray_method("pass_through", "enable_pissa_init"))
+        ray.get(policy.async_init_model(args.base_model, num_training_steps=1e9))
+        ray.get(policy.async_run_ray_method("pass_through", "_set_pad_token_id", tokenizer.pad_token_id))
+        ray.get(policy.async_run_ray_method("pass_through", "prime_optimizer_state"))
+
         checkpoint_dir = args.output_dir / "global_step_0"
-        backend.save_checkpoint_directory(str(checkpoint_dir / "policy"), model_id)
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through",
+                "save_checkpoint",
+                str(checkpoint_dir / "policy"),
+                tokenizer,
+            )
+        )
         torch.save(
             {"global_step": 0, "config": get_config_as_dict(cfg)},
             checkpoint_dir / "trainer_state.pt",
         )
-        backend.save_pissa_residual(str(args.output_dir / "residual_base"), model_id)
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through",
+                "save_pissa_residual",
+                str(args.output_dir / "residual_base"),
+                tokenizer,
+            )
+        )
         _write_manifest(args.output_dir, args.base_model, args.rank, cfg)
         logger.info(f"PiSSA initialization artifacts saved to {args.output_dir}")
     finally:
-        if backend.has_model(model_id):
-            backend.delete_model(model_id)
-        elif ray.is_initialized():
+        if ray.is_initialized():
             ray.shutdown()
 
 
