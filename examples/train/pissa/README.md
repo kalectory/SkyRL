@@ -28,4 +28,6 @@ PISSA_INIT_DIR="$HOME/pissa/qwen3_0.6b_r32" \
 
 The policy loads the residual model and resumes the initialized adapter from `global_step_0`; the frozen KL reference loads the original source model. Additional arguments appended to the launcher override its defaults.
 
+If you override the producer's base model or LoRA rank, pass the same values to the training launcher and use the original base model for the KL reference.
+
 PiSSA uses `alpha=rank`, `target_modules=all-linear`, and no exclusions. Apart from loading the PiSSA artifacts, the training example matches `examples/train/megatron/run_megatron_lora_qwen3-0.6b.sh`.
