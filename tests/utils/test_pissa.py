@@ -73,7 +73,7 @@ def test_factor_symmetry():
     w = torch.randn(32, 24)
     rank = 6
     linear_in, linear_out, _ = pissa_decompose(w, rank, 1.0)
-    u, s, vh = torch.linalg.svd(w.float(), full_matrices=False)
+    _, s, _ = torch.linalg.svd(w.float(), full_matrices=False)
     expected = s[:rank].sqrt()
     torch.testing.assert_close(linear_out.norm(dim=0), expected, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(linear_in.norm(dim=1), expected, atol=1e-6, rtol=1e-6)
@@ -111,7 +111,7 @@ def test_pissa_initialization_reshards_parallel_adapters(monkeypatch, input_is_p
     base_shard_dim = 1 if input_is_parallel else 0
     linear_in_shard_dim = 1 if input_is_parallel else 0
     base_weight = full_weight.chunk(tp_size, dim=base_shard_dim)[tp_rank].clone()
-    linear_in_shape = list((rank, full_weight.shape[1]))
+    linear_in_shape = [rank, full_weight.shape[1]]
     linear_in_shape[linear_in_shard_dim] //= tp_size
 
     base_linear = SimpleNamespace(weight=torch.nn.Parameter(base_weight))
