@@ -56,11 +56,6 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
-    pissa_pre_wrap_hook,
-    validate_pissa_config,
-    zeroed_adapters,
-)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -329,8 +324,6 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
-    _is_pissa = False
-
     def init_configs(
         self,
         model_path,
@@ -506,8 +499,6 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-            if self._is_pissa:
-                self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
@@ -718,28 +709,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.
         self.adapter_store: Optional[AdapterStore] = AdapterStore() if self._is_lora else None
-
-    def enable_pissa_init(self) -> None:
-        """Enable PiSSA decomposition before this worker constructs its model."""
-        if self.actor_module is not None:
-            raise RuntimeError("PiSSA initialization must be enabled before model construction")
-        validate_pissa_config(
-            self.cfg.policy.model.lora.rank,
-            self.cfg.policy.megatron_config.lora_config.lora_type,
-        )
-        self._is_pissa = True
-
-    def save_pissa_residual(self, export_dir: str, tokenizer) -> None:
-        """Export the frozen residual base from an initialized PiSSA model."""
-        if not self._is_pissa:
-            raise RuntimeError("PiSSA initialization is not enabled")
-        with zeroed_adapters(self.model.actor_module):
-            self.strategy.save_hf_model(
-                self.bridge,
-                self.model,
-                export_dir,
-                tokenizer=tokenizer,
-            )
 
     def init_worker_process_group(self):
         """

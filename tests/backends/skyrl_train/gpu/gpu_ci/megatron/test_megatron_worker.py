@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import (
     MegatronTorchProfilerConfig,
@@ -379,15 +380,27 @@ async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
         cfg.trainer.bf16 = False
         return cfg
 
-    def megatron_forward(cfg, setup_method=None):
-        actor_group = init_worker_with_type(
-            "policy",
-            shared_pg=None,
-            colocate_all=False,
-            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg=cfg,
-            setup_method=setup_method,
-        )
+    def megatron_forward(cfg, worker_cls=None):
+        if worker_cls is None:
+            actor_group = init_worker_with_type(
+                "policy",
+                shared_pg=None,
+                colocate_all=False,
+                num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+                cfg=cfg,
+            )
+        else:
+            actor_group = PPORayActorGroup(
+                cfg.trainer,
+                num_nodes=1,
+                num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+                ray_actor_type=worker_cls,
+                num_gpus_per_actor=0.75,
+                colocate_all=False,
+                sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+                record_memory=cfg.trainer.policy.record_memory,
+            )
+            ray.get(actor_group.async_init_model(cfg.trainer.policy.model.path))
         all_rank = ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch))
         output = WorkerOutput.cat(actor_group.actor_infos, all_rank)
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
@@ -397,7 +410,9 @@ async def test_megatron_pissa_producer_identity_at_init(ray_init_fixture):
         rank=32,
         alpha=32,
     )
-    logprobs_pissa = megatron_forward(pissa_cfg, setup_method="enable_pissa_init")
+    from skyrl.backends.skyrl_train.workers.megatron.pissa_init import create_pissa_init_worker
+
+    logprobs_pissa = megatron_forward(pissa_cfg, worker_cls=create_pissa_init_worker())
 
     ray.shutdown()
     ray_init_for_tests()

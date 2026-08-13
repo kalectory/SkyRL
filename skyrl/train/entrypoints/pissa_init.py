@@ -40,7 +40,9 @@ def main() -> None:
     import ray
     import torch
 
-    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+    from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
+        create_pissa_init_worker,
+    )
     from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
     from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
     from skyrl.train.utils.utils import initialize_ray
@@ -74,13 +76,12 @@ def main() -> None:
             cfg.trainer,
             cfg.trainer.placement.policy_num_nodes,
             cfg.trainer.placement.policy_num_gpus_per_node,
-            PolicyWorker,
+            create_pissa_init_worker(),
             num_gpus_per_actor=1,
             colocate_all=False,
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             record_memory=cfg.trainer.policy.record_memory,
         )
-        ray.get(policy.async_run_ray_method("pass_through", "enable_pissa_init"))
         ray.get(policy.async_init_model(args.base_model, num_training_steps=1e9))
         ray.get(policy.async_run_ray_method("pass_through", "_set_pad_token_id", tokenizer.pad_token_id))
         ray.get(policy.async_run_ray_method("pass_through", "prime_optimizer_state"))

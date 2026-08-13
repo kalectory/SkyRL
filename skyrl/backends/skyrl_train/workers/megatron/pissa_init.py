@@ -147,3 +147,65 @@ def apply_pissa_init(model_chunks) -> None:
         _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group)
 
     logger.info(f"PiSSA: initialized {len(adapters)} LoRA adapter(s)")
+
+
+def create_pissa_init_worker():
+    """Create the Ray worker used by the offline PiSSA producer."""
+    import ray
+    from megatron.core.distributed.distributed_data_parallel_config import (
+        DistributedDataParallelConfig,
+    )
+
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+        MegatronPolicyWorkerBase,
+    )
+    from skyrl.train.config.config import get_config_as_dict
+
+    class PiSSAInitWorker(MegatronPolicyWorkerBase):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            validate_pissa_config(
+                self.cfg.policy.model.lora.rank,
+                self.cfg.policy.megatron_config.lora_config.lora_type,
+            )
+
+        def make_megatron_module(
+            self,
+            wrap_with_ddp=True,
+            ddp_config=None,
+            lora_config=None,
+            lora_type="lora",
+            bf16=True,
+        ):
+            self.configure_lora(lora_config, lora_type)
+
+            def lora_pre_wrap_hook(model):
+                lora_model = self.lora_cls(model, training=True)
+                self.lora_cls.set_params_to_save(lora_model)
+                return lora_model
+
+            self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+            self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
+
+            resolved_ddp_config = DistributedDataParallelConfig()
+            if wrap_with_ddp:
+                resolved_ddp_config.use_distributed_optimizer = True
+            if ddp_config is not None:
+                for key, value in get_config_as_dict(ddp_config).items():
+                    setattr(resolved_ddp_config, key, value)
+            return self.provider.provide_distributed_model(
+                ddp_config=resolved_ddp_config,
+                wrap_with_ddp=wrap_with_ddp,
+                bf16=bf16,
+            )
+
+        def save_pissa_residual(self, export_dir: str, tokenizer) -> None:
+            with zeroed_adapters(self.model.actor_module):
+                self.strategy.save_hf_model(
+                    self.bridge,
+                    self.model,
+                    export_dir,
+                    tokenizer=tokenizer,
+                )
+
+    return ray.remote(num_gpus=1)(PiSSAInitWorker)
