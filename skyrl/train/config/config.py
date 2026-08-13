@@ -87,21 +87,10 @@ class SkyRLLoraConfig(BaseConfig):
     target_modules: str = "all-linear"
     exclude_modules: Optional[str] = None
     init_method: str = "kaiming"
-    """LoRA adapter initialization method (mirrors PEFT's ``init_lora_weights``).
-    Standard values: "xavier", "normal", "kaiming", "zero".
-    PiSSA values: "pissa" (exact SVD) or "pissa_niter_<N>" (fast randomized SVD),
-    which seed A/B from the base weight's principal singular components and freeze
-    the residual W_res = W - A·B in place of W.
-    - FSDP: passed straight to PEFT ``init_lora_weights`` (PiSSA handled natively).
-    - Megatron: standard values feed ``lora_A_init_method``; PiSSA values trigger a
-      post-transform SVD overwrite. PiSSA wants alpha==rank, and rank must be
-      divisible by the tensor-parallel size."""
+    """LoRA initialization method, including ``pissa`` and ``pissa_niter_<N>``."""
 
     export_residual_base: bool = False
-    """PiSSA produce-only: when exporting the HF model, temporarily zero the LoRA B
-    (linear_out) factor so the bridge's adapter-merge emits the frozen residual base
-    W_res (= base + 0) instead of the reconstructed W. Default off; honored only for
-    PiSSA inits. Used to materialize a W_res base for merge_lora=false serving."""
+    """Export PiSSA's frozen residual instead of the adapter-merged model."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a

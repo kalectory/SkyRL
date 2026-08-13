@@ -56,7 +56,10 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook, zeroed_adapters
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
+    pissa_pre_wrap_hook,
+    zeroed_adapters,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -492,13 +495,8 @@ class MegatronWorker:
         )
 
         if lora_config is not None:
-            # PiSSA isn't a megatron-bridge init method (it reads the base weight and
-            # sets A and B jointly), so the bridge gets a standard A-init and PiSSA
-            # overwrites A/B + the base after the transform via its own pre-wrap hook.
-            # TODO: when the pinned megatron-bridge supports init_lora_weights="pissa"
-            # natively (upstream PR pending), pass init_method straight through here and
-            # delete pissa_pre_wrap_hook + this placeholder.
             pissa = PissaConfig.from_init_method(lora_config.init_method)
+            # PiSSA overwrites the bridge's placeholder initialization in a later hook.
             self.configure_lora(lora_config, lora_type, "kaiming" if pissa else lora_config.init_method)
 
             def lora_pre_wrap_hook(model):
@@ -695,9 +693,6 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model in HuggingFace safetensors format. PiSSA produce path: with
-        # export_residual_base set, zero the adapter so the bridge's merge emits the
-        # frozen residual base W_res instead of the reconstructed W (default off).
         lora_cfg = self.cfg.policy.model.lora
         if lora_cfg.export_residual_base and PissaConfig.from_init_method(lora_cfg.init_method):
             with zeroed_adapters(self.model.actor_module):

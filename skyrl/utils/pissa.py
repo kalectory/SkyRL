@@ -1,19 +1,4 @@
-"""PiSSA: principal-SVD LoRA initialization — pure math + offline materialization.
-
-PiSSA (Meng et al., 2024, https://arxiv.org/abs/2404.02948) seeds LoRA A/B from
-the base weight's principal singular components and freezes the residual
-``W_res = W - A·B`` in place of ``W``, so the adapter starts on the principal
-subspace and ``W_res + A·B == W`` at init.
-
-This module has no GPU / distributed / megatron dependencies so it is usable on
-CPU and offline. Two consumers build on it:
-  - Runtime Megatron application:
-    ``skyrl/backends/skyrl_train/workers/megatron/pissa_init.py`` (TP-aware, in-worker).
-  - Offline materialization (``materialize_pissa`` here): write a residual base
-    model + principal adapter as standard HF/PEFT artifacts, so a multi-tenant
-    LoRA deployment serves PiSSA as plain LoRA over a frozen base (no runtime
-    base mutation, no weight-sync changes).
-"""
+"""PiSSA decomposition and offline residual-base materialization."""
 
 import dataclasses
 import logging
@@ -29,20 +14,13 @@ PISSA_PREFIX = "pissa"
 
 @dataclasses.dataclass(frozen=True)
 class PissaConfig:
-    """Parsed PiSSA initialization options.
-
-    Carries everything the init needs as typed fields; the ``init_method`` string
-    is parsed once (``from_init_method``) and the object is passed around thereafter.
-    """
+    """Parsed PiSSA initialization options."""
 
     niter: int = 0  # 0 = exact SVD; >0 = torch.svd_lowrank subspace iterations
 
     @classmethod
     def from_init_method(cls, init_method: str) -> Optional["PissaConfig"]:
-        """Parse an ``init_method`` string into a PissaConfig, or None if not PiSSA.
-
-        Mirrors PEFT: "pissa" -> exact SVD; "pissa_niter_<N>" -> fast randomized SVD.
-        """
+        """Parse PEFT-compatible PiSSA initialization names."""
         if init_method == PISSA_PREFIX:
             return cls(niter=0)
         if init_method.startswith(f"{PISSA_PREFIX}_niter_"):
@@ -51,24 +29,7 @@ class PissaConfig:
 
 
 def pissa_decompose(weight: torch.Tensor, rank: int, scale: float, niter: int = 0):
-    """Decompose a base weight into PiSSA adapter factors + frozen residual.
-
-    Pure tensor math, unit-testable on CPU. Operates on the full, unsharded weight
-    in ``(out_features, in_features)`` layout (torch ``nn.Linear`` convention, ``y = x Wᵀ``).
-
-    Args:
-      weight: full base weight, shape (out, in). Upcast to float32 internally.
-      rank: LoRA rank r (number of principal components to keep).
-      scale: the adapter's ``alpha/dim`` forward scaling factor.
-      niter: 0 for exact SVD; >0 uses ``torch.svd_lowrank`` with this many subspace
-        iterations (the paper's fast-SVD variant, "pissa_niter_N").
-
-    Returns:
-      (linear_in, linear_out, residual) all float32:
-        linear_in:  (r, in)   — adapter A
-        linear_out: (out, r)  — adapter B
-        residual:   (out, in) — frozen base, == weight − scale·linear_out·linear_in
-    """
+    """Return PiSSA A, B, and residual factors for a full ``(out, in)`` weight."""
     out_features, in_features = weight.shape
     max_rank = min(out_features, in_features)
     if rank > max_rank:
@@ -89,7 +50,7 @@ def pissa_decompose(weight: torch.Tensor, rank: int, scale: float, niter: int = 
     linear_out = (u_r * sqrt_s.unsqueeze(0)) * inv  # (out, r)
     linear_in = (sqrt_s.unsqueeze(1) * vh_r) * inv  # (r, in)
 
-    principal = (u_r * s_r.unsqueeze(0)) @ vh_r  # (out, in) == scale·linear_out·linear_in
+    principal = (u_r * s_r.unsqueeze(0)) @ vh_r
     residual = w - principal
     return linear_in, linear_out, residual
 
@@ -103,20 +64,7 @@ def materialize_pissa(
     niter: Optional[int] = None,
     dtype: str = "bfloat16",
 ) -> tuple[str, str]:
-    """Write a PiSSA residual base model + principal adapter as HF/PEFT artifacts.
-
-    Decomposes ``model_path`` once (offline, full-rank) and emits:
-      - ``<out_dir>/residual_base``: an HF model whose target weights are W_res.
-      - ``<out_dir>/adapter``: the principal A/B as a PEFT LoRA adapter, such that
-        ``residual_base + adapter == model_path`` at load time.
-
-    A deployment then serves PiSSA as plain LoRA over ``residual_base`` (the
-    trainer and inference engine load the same base), and the run starts the
-    adapter from ``adapter`` — so multi-tenant ``merge_lora=false`` works with no
-    runtime base mutation or weight-sync changes.
-
-    Returns (residual_base_dir, adapter_dir).
-    """
+    """Write a residual base and principal adapter as HF/PEFT artifacts."""
     import os
 
     from peft import LoraConfig, get_peft_model
@@ -133,16 +81,14 @@ def materialize_pissa(
         init_lora_weights=init_lora_weights,
     )
     peft_model = get_peft_model(model, lora_config)
-    # Stop PiSSA's SVD from re-running when the adapter is reloaded for training/serving.
+    # Reload the materialized factors without running PiSSA again.
     peft_model.peft_config["default"].init_lora_weights = True
 
     adapter_dir = os.path.join(out_dir, "adapter")
     residual_base_dir = os.path.join(out_dir, "residual_base")
-    peft_model.save_pretrained(adapter_dir)  # principal A/B
-    residual_model = peft_model.unload()  # strip adapters -> base_layer holds W_res
+    peft_model.save_pretrained(adapter_dir)
+    residual_model = peft_model.unload()
     residual_model.save_pretrained(residual_base_dir)
-    # Convenience copy so residual_base is servable; weights (the load-bearing
-    # output) are already written, so a tokenizer-less source is non-fatal.
     try:
         AutoTokenizer.from_pretrained(model_path).save_pretrained(residual_base_dir)
     except (OSError, ValueError) as exc:

@@ -1,20 +1,4 @@
-"""Runtime PiSSA initialization for Megatron LoRA adapters.
-
-Applies PiSSA (the pure math lives in ``skyrl.utils.pissa``) to megatron-bridge
-LoRA adapters *after* the LoRA transform, inside the worker's lora pre-wrap hook
-(by which point the pretrained HF weights are loaded). For each adapted linear,
-the base weight is gathered across tensor-parallel ranks, decomposed, and the
-residual + principal A/B written back in the sharded layout. The pristine
-snapshot taken later by ``AdapterStore.register_pristine`` captures this state.
-
-megatron-bridge's ``ParallelLinearAdapter.forward`` computes
-``(alpha/dim)·linear_out(linear_in(x))``, so the effective delta weight is
-``scale·B·A`` with ``scale = alpha/dim``; ``pissa_decompose`` folds ``1/√scale``
-into both factors so ``scale·B·A`` reproduces the principal component for any alpha.
-
-For the multi-tenant (``merge_lora=false``) serving path, prefer materializing a
-residual base model offline via ``skyrl.utils.pissa.materialize_pissa`` instead.
-"""
+"""Tensor-parallel PiSSA initialization for Megatron LoRA adapters."""
 
 import contextlib
 
@@ -25,11 +9,7 @@ from skyrl.utils.pissa import PissaConfig, pissa_decompose
 
 @contextlib.contextmanager
 def zeroed_adapters(model_chunks):
-    """Temporarily zero every LoRA adapter's linear_out (B), restoring on exit.
-
-    With B=0 the bridge's adapter-merge on HF export emits the frozen base (W_res
-    for PiSSA) instead of base + principal. PiSSA produce path only.
-    """
+    """Temporarily zero LoRA B factors while exporting the residual base."""
     from megatron.bridge.peft.lora_layers import LoRALinear
     from megatron.bridge.peft.utils import ParallelLinearAdapter
 
@@ -49,12 +29,7 @@ def zeroed_adapters(model_chunks):
 
 
 def pissa_pre_wrap_hook(config: PissaConfig):
-    """Build a pre-wrap hook that applies PiSSA init after the LoRA transform.
-
-    Register it after the standard LoRA transform hook: it overwrites the
-    freshly-built adapter's A/B and the frozen base with the principal-SVD
-    decomposition, once the pretrained weights are loaded.
-    """
+    """Build a pre-wrap hook that applies PiSSA after the LoRA transform."""
 
     def hook(model):
         apply_pissa_init(model, config)
@@ -91,26 +66,18 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
             "must be loaded first. Disable meta-device init (init_model_with_meta_device) for PiSSA."
         )
 
-    input_is_parallel = adapter.input_is_parallel  # True => RowParallel base (linear_proj/fc2)
+    input_is_parallel = adapter.input_is_parallel
     rank = adapter.dim
     scale = adapter.alpha / adapter.dim
 
-    # 1. Reconstruct the full base weight W (out, in) in fp32.
-    #    ColumnParallel base shards out (dim 0); RowParallel base shards in (dim 1).
     base_shard_dim = 1 if input_is_parallel else 0
     if tp_size == 1:
         full_w = base_weight.data.float()
     else:
         full_w = _all_gather(base_weight.data.float(), base_shard_dim, tp_size, tp_group)
 
-    # 2. PiSSA decomposition on the full weight.
     linear_in_full, linear_out_full, residual_full = pissa_decompose(full_w, rank, scale, niter)
 
-    # 3. Write back, re-sharding to each tensor's TP layout.
-    #    - base weight: same sharding as it was read.
-    #    - linear_out is always ColumnParallel (out/TP, dim) -> shard out (dim 0).
-    #    - linear_in: ColumnParallel (dim/TP, in) -> shard dim 0 when base is column-parallel;
-    #                 RowParallel  (dim, in/TP)   -> shard dim 1 when base is row-parallel.
     lin_in_shard_dim = 1 if input_is_parallel else 0
     base_dtype = base_weight.dtype
     lora_dtype = adapter.linear_in.weight.dtype
@@ -122,19 +89,7 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
 
 @torch.no_grad()
 def apply_pissa_init(model_chunks, config: PissaConfig) -> None:
-    """Overwrite megatron-bridge LoRA adapters in-place with PiSSA initialization.
-
-    Walks every ``LoRALinear`` in the (already weight-loaded, LoRA-transformed)
-    model and replaces the adapter's A/B and the frozen base weight with the
-    PiSSA factors. Grouped MoE expert adapters are skipped (their sharded layout
-    differs); a count of skipped modules is logged.
-
-    Args:
-      model_chunks: the LoRA-transformed model (single module or VPP chunk list).
-      config: parsed PiSSA options (fast-SVD niter, etc.).
-    """
-    # Lazy import: megatron.bridge is only importable inside the GPU worker, and
-    # keeping these out of module scope lets pissa_decompose be unit-tested on CPU.
+    """Overwrite supported Megatron LoRA adapters with PiSSA factors."""
     import megatron.core.parallel_state as mpu
     from loguru import logger
     from megatron.bridge.peft.lora_layers import LoRALinear

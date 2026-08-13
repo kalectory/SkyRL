@@ -1,4 +1,4 @@
-"""CPU tests for PiSSA pure math + offline materialization (no Megatron/GPU)."""
+"""Tests for PiSSA decomposition and offline materialization."""
 
 import math
 
@@ -9,7 +9,6 @@ from skyrl.utils.pissa import PissaConfig, materialize_pissa, pissa_decompose
 
 
 def _principal(weight, rank):
-    """Reference top-r reconstruction via SVD."""
     u, s, vh = torch.linalg.svd(weight.float(), full_matrices=False)
     return (u[:, :rank] * s[:rank].unsqueeze(0)) @ vh[:rank, :]
 
@@ -44,7 +43,6 @@ def test_adapter_equals_principal_components(rank):
 
 @pytest.mark.parametrize("alpha,rank", [(8, 16), (32, 16), (16, 16)])
 def test_scale_invariance(alpha, rank):
-    """The merged delta scale*B@A must reproduce the principal component for any alpha/rank."""
     torch.manual_seed(2)
     w = torch.randn(50, 50)
     scale = alpha / rank
@@ -69,7 +67,6 @@ def test_rank_too_large_raises():
 
 
 def test_factor_symmetry():
-    """A and B should carry equal singular-value mass (Sᵣ^½ split), per the PiSSA init."""
     torch.manual_seed(4)
     w = torch.randn(32, 24)
     rank = 6
@@ -92,7 +89,6 @@ def test_non_pissa_init_method_parses_to_none(method):
 
 
 def test_niter_reconstructs_weight():
-    """Fast randomized SVD (niter>0) preserves the W_res + scale·B·A == W identity."""
     torch.manual_seed(5)
     out, in_, rank = 64, 48, 8
     base = (torch.randn(out, rank) * torch.arange(rank, 0, -1).float()) @ torch.randn(rank, in_)
@@ -104,7 +100,6 @@ def test_niter_reconstructs_weight():
 
 
 def test_materialize_pissa_is_identity_at_init(tmp_path):
-    """residual_base + principal adapter must reproduce the original model at init."""
     pytest.importorskip("peft")
     transformers = pytest.importorskip("transformers")
     from peft import PeftModel

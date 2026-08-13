@@ -375,10 +375,7 @@ async def test_megatron_forward(
 )
 @pytest.mark.megatron
 async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_per_node):
-    """PiSSA is identity at init: W_res + A·B == W, so a PiSSA-initialized LoRA
-    forward must match the base-model forward. Exercises the TP/PP-sharded
-    residual + A/B write-back (gather base across TP, decompose, reshard).
-    """
+    """PiSSA initialization preserves the base-model forward across TP and PP."""
     batch = get_test_training_batch(max(4, gpus_per_node))
     num_actions = batch.metadata["response_length"]
 
@@ -402,7 +399,6 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_pe
         output = WorkerOutput.cat(actor_group.actor_infos, all_rank)
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
-    # PiSSA-initialized LoRA (alpha == rank); must reproduce the base model at init.
     pissa_cfg = base_cfg()
     pissa_cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16, init_method="pissa")
     logprobs_pissa = megatron_forward(pissa_cfg)
@@ -410,7 +406,6 @@ async def test_megatron_pissa_identity_at_init(ray_init_fixture, tp, pp, gpus_pe
     ray.shutdown()
     ray_init_for_tests()
 
-    # Base model forward (no adapter) = ground-truth W.
     logprobs_base = megatron_forward(base_cfg())
 
     response_mask = batch["attention_mask"][:, -num_actions:].bool()
