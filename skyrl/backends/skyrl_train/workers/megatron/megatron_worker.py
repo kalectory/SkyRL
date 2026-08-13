@@ -437,7 +437,7 @@ class MegatronWorker:
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
-    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", lora_a_init_method: Optional[str] = None):
+    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", lora_a_init_method: str | None = None):
         lora_a_init_method = lora_a_init_method or lora_config.init_method
         if lora_type == "lora":
             self.lora_cls = LoRA(

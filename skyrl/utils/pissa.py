@@ -1,14 +1,13 @@
 """PiSSA decomposition and offline residual-base materialization."""
 
 import math
-from typing import Optional
 
 import torch
 
 PISSA_PREFIX = "pissa"
 
 
-def parse_pissa_init_method(init_method: str) -> Optional[int]:
+def parse_pissa_init_method(init_method: str) -> int | None:
     """Return the PiSSA SVD iteration count, or ``None`` for another initializer."""
     if init_method == PISSA_PREFIX:
         return 0
@@ -48,9 +47,9 @@ def materialize_pissa(
     model_path: str,
     rank: int,
     out_dir: str,
-    alpha: Optional[int] = None,
+    alpha: int | None = None,
     target_modules: str = "all-linear",
-    niter: Optional[int] = None,
+    niter: int | None = None,
     dtype: str = "bfloat16",
 ) -> tuple[str, str]:
     """Write a residual base and principal adapter as HF/PEFT artifacts."""
