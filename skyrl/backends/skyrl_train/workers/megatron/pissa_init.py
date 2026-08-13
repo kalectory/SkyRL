@@ -64,14 +64,10 @@ def zeroed_adapters(model_chunks):
                 weight.copy_(original)
 
 
-def pissa_pre_wrap_hook():
-    """Build a pre-wrap hook that applies PiSSA after the LoRA transform."""
-
-    def hook(model):
-        apply_pissa_init(model)
-        return model
-
-    return hook
+def pissa_pre_wrap_hook(model):
+    """Apply PiSSA after the LoRA transform."""
+    apply_pissa_init(model)
+    return model
 
 
 def _all_gather(local: torch.Tensor, dim: int, tp_size: int, tp_group) -> torch.Tensor:
@@ -178,7 +174,7 @@ class PiSSAInitWorkerBase(MegatronPolicyWorkerBase):
             return lora_model
 
         self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
-        self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook())
+        self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook)
 
         resolved_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
