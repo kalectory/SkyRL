@@ -8,7 +8,7 @@ import ray
 import torch
 from loguru import logger
 from megatron.bridge.peft.lora_layers import LoRALinear
-from megatron.bridge.peft.utils import ParallelLinearAdapter
+from megatron.bridge.peft.utils import GroupedExpertLinearAdapter, ParallelLinearAdapter
 from megatron.core.distributed.distributed_data_parallel_config import (
     DistributedDataParallelConfig,
 )
@@ -52,7 +52,9 @@ def zeroed_adapters(model_chunks):
     with torch.no_grad():
         for chunk in chunks:
             for module in chunk.modules():
-                if isinstance(module, LoRALinear) and isinstance(module.adapter, ParallelLinearAdapter):
+                if isinstance(module, LoRALinear) and isinstance(
+                    module.adapter, (ParallelLinearAdapter, GroupedExpertLinearAdapter)
+                ):
                     weight = module.adapter.linear_out.weight
                     saved.append((weight, weight.detach().clone()))
                     weight.zero_()
@@ -119,6 +121,50 @@ def _init_one_adapter(base_linear, adapter, tp_size: int, tp_rank: int, tp_group
     adapter.linear_in.weight.data.copy_(_shard(linear_in_full, lin_in_shard_dim, tp_rank, tp_size).to(lora_dtype))
 
 
+def _grouped_base_weights(base_linear, num_experts: int) -> list[torch.Tensor]:
+    """Return writable views of each local expert weight."""
+    if getattr(base_linear, "single_grouped_weight", False):
+        weight = base_linear.weight
+        if weight.shape[0] == num_experts:
+            return list(weight.unbind(0))
+        if weight.shape[0] % num_experts == 0:
+            return list(weight.chunk(num_experts, dim=0))
+        raise ValueError(f"PiSSA cannot split grouped weight shape {tuple(weight.shape)} into {num_experts} experts")
+    return [getattr(base_linear, f"weight{expert_idx}") for expert_idx in range(num_experts)]
+
+
+@torch.no_grad()
+def _init_grouped_adapter(base_linear, adapter) -> None:
+    etp_group = adapter.expert_tp_group
+    etp_size = torch.distributed.get_world_size(etp_group)
+    etp_rank = torch.distributed.get_rank(etp_group)
+    base_weights = _grouped_base_weights(base_linear, adapter.num_local_experts)
+    base_shard_dim = 1 if adapter.input_is_parallel else 0
+    linear_in_shard_dim = 1 if adapter.input_is_parallel else 0
+    scale = adapter.alpha / adapter.dim
+
+    for expert_idx, base_weight in enumerate(base_weights):
+        if base_weight.is_meta:
+            raise RuntimeError(
+                "PiSSA: base weight is on the meta device at adapter-init time; pretrained weights "
+                "must be loaded first. Disable meta-device init (init_model_with_meta_device) for PiSSA."
+            )
+        full_weight = (
+            base_weight.data.float()
+            if etp_size == 1
+            else _all_gather(base_weight.data.float(), base_shard_dim, etp_size, etp_group)
+        )
+        linear_in, linear_out, residual = pissa_decompose(full_weight, adapter.dim, scale)
+
+        base_weight.data.copy_(_shard(residual, base_shard_dim, etp_rank, etp_size).to(base_weight.dtype))
+        adapter.linear_in.weight.data[expert_idx].copy_(
+            _shard(linear_in, linear_in_shard_dim, etp_rank, etp_size).to(adapter.linear_in.weight.dtype)
+        )
+        adapter.linear_out.weight.data[expert_idx].copy_(
+            _shard(linear_out, 0, etp_rank, etp_size).to(adapter.linear_out.weight.dtype)
+        )
+
+
 @torch.no_grad()
 def apply_pissa_init(model_chunks) -> None:
     """Overwrite supported Megatron LoRA adapters with PiSSA factors."""
@@ -128,6 +174,7 @@ def apply_pissa_init(model_chunks) -> None:
 
     chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
     adapters = []
+    grouped_adapters = []
     unsupported = []
     for chunk in chunks:
         for module in chunk.modules():
@@ -135,19 +182,23 @@ def apply_pissa_init(model_chunks) -> None:
                 continue
             if isinstance(module.adapter, ParallelLinearAdapter):
                 adapters.append((module.to_wrap, module.adapter))
+            elif isinstance(module.adapter, GroupedExpertLinearAdapter):
+                grouped_adapters.append((module.to_wrap, module.adapter))
             else:
                 unsupported.append(type(module.adapter).__name__)
 
     if unsupported:
         adapter_types = ", ".join(sorted(set(unsupported)))
         raise ValueError(f"PiSSA does not support adapter types: {adapter_types}")
-    if not adapters:
+    if not adapters and not grouped_adapters:
         raise ValueError("PiSSA found no supported LoRA adapters")
 
     for base_linear, adapter in adapters:
         _init_one_adapter(base_linear, adapter, tp_size, tp_rank, tp_group)
+    for base_linear, adapter in grouped_adapters:
+        _init_grouped_adapter(base_linear, adapter)
 
-    logger.info(f"PiSSA: initialized {len(adapters)} LoRA adapter(s)")
+    logger.info(f"PiSSA: initialized {len(adapters) + len(grouped_adapters)} LoRA adapter(s)")
 
 
 class PiSSAInitWorkerBase(MegatronPolicyWorkerBase):

@@ -42,6 +42,7 @@ def main() -> None:
             "trainer.policy.model.lora.alpha": args.rank,
             "trainer.policy.model.lora.target_modules": "all-linear",
             "trainer.policy.model.lora.exclude_modules": None,
+            "trainer.policy.model.lora.share_expert_adapters": False,
             "trainer.placement.colocate_all": False,
         }
     )
