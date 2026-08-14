@@ -207,9 +207,7 @@ def test_pissa_initialization_reshards_grouped_experts(monkeypatch, input_is_par
         pytest.param(MOE_MODEL_NAME, 4, 1, 8, 1, 8, id="grouped_moe"),
     ],
 )
-def test_pissa_worker_preserves_base_model_forward(
-    ray_init_fixture, model_name, tp, pp, ep, etp, num_gpus
-):
+def test_pissa_worker_preserves_base_model_forward(ray_init_fixture, model_name, tp, pp, ep, etp, num_gpus):
     batch = get_test_training_batch(max(4, num_gpus))
 
     def base_cfg():
