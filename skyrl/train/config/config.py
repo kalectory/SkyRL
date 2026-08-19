@@ -412,7 +412,7 @@ class MegatronHFExportConfig(BaseConfig):
 @dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
-    """``"lora"`` or ``"canonical_lora"``.
+    """``"lora"``, ``"canonical_lora"``, or ``"lora_xs"``.
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
