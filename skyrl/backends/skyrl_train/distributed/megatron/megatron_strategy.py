@@ -105,6 +105,7 @@ def _patched_update_fp32_params_by_new_state(self):
 _orig_load_parameter_state_from_dp_reshardable = DistributedOptimizer.load_parameter_state_from_dp_reshardable
 
 
+@torch.no_grad()
 def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
     """Wrapper around the original method that preserves the Adam step counter.
 
