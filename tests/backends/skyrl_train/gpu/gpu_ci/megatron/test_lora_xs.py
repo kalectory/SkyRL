@@ -38,6 +38,8 @@ def test_lora_xs_factors_use_principal_components():
     linear_in, linear_out = lora_xs_init_worker.lora_xs_factors(weight, rank=4)
 
     torch.testing.assert_close(linear_out @ linear_in, _principal(weight, 4))
+    assert linear_in.is_contiguous()
+    assert linear_out.is_contiguous()
 
 
 def test_lora_xs_uses_unfused_forward_for_square_core(monkeypatch):

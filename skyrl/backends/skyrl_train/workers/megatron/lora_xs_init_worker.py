@@ -30,7 +30,9 @@ def lora_xs_factors(weight: torch.Tensor, rank: int) -> tuple[torch.Tensor, torc
         raise ValueError(f"LoRA-XS rank {rank} exceeds maximum rank {max_rank} for weight shape {tuple(weight.shape)}")
 
     u, s, vh = torch.linalg.svd(weight.float(), full_matrices=False)
-    return s[:rank].unsqueeze(1) * vh[:rank, :], u[:, :rank]
+    linear_in = (s[:rank].unsqueeze(1) * vh[:rank, :]).contiguous()
+    linear_out = u[:, :rank].contiguous()
+    return linear_in, linear_out
 
 
 def _synchronized_lora_xs_factors(weight: torch.Tensor, rank: int, group) -> tuple[torch.Tensor, torch.Tensor]:
