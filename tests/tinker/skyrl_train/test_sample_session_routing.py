@@ -17,7 +17,11 @@ import pytest
 skyrl_train_backend = pytest.importorskip("skyrl.backends.skyrl_train_backend")
 
 from skyrl.tinker import types  # noqa: E402
+from skyrl.tinker.config import EngineConfig  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
+from skyrl.tinker.extra.skyrl_train_inference_forwarding import (  # noqa: E402
+    _resolve_forwarded_model_name,
+)
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
@@ -96,3 +100,17 @@ def test_sample_with_remote_client_routes_model(monkeypatch, uses_lora_weight_sy
     sample(fake_self, prepare_sample_batch({"req": ("model_test", _sample_input())}))
 
     assert spy.payloads[0]["json"]["model"] == expected_model
+
+
+@pytest.mark.parametrize(
+    ("merge_lora", "expected_model"),
+    [(False, "model_test"), (True, BASE_MODEL)],
+)
+def test_forwarded_sample_routes_merged_model(merge_lora, expected_model):
+    engine_config = EngineConfig(
+        base_model=BASE_MODEL,
+        backend="megatron",
+        backend_config={"trainer.policy.megatron_config.lora_config.merge_lora": merge_lora},
+    )
+
+    assert _resolve_forwarded_model_name(engine_config, "model_test", None) == expected_model

@@ -17,6 +17,25 @@ from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.utils.log import logger
 
+_MEGATRON_MERGE_LORA_KEY = "trainer.policy.megatron_config.lora_config.merge_lora"
+_SERVED_MODEL_NAME_KEY = "generator.inference_engine.served_model_name"
+
+
+def _resolve_forwarded_model_name(
+    engine_config: EngineConfig,
+    model_id: str,
+    base_model: str | None,
+) -> str:
+    """Resolve the vLLM model name for an API-forwarded sample."""
+    if base_model:
+        return base_model
+
+    backend_config = engine_config.backend_config
+    merge_lora = engine_config.backend == "megatron" and backend_config.get(_MEGATRON_MERGE_LORA_KEY, True)
+    if merge_lora:
+        return backend_config.get(_SERVED_MODEL_NAME_KEY) or engine_config.base_model
+    return model_id
+
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
@@ -112,9 +131,7 @@ class SkyRLTrainInferenceForwardingClient:
     async def _forward(
         self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
     ) -> types.SampleOutput:
-        # model_id matches the LoRA name registered with vLLM during
-        # save_weights_for_sampler; base_model is used for non-LoRA sampling.
-        model_name = base_model if base_model else model_id
+        model_name = _resolve_forwarded_model_name(self.engine_config, model_id, base_model)
 
         model_input = sample_req.prompt.to_types()
         prompt_tokens = render_model_input([model_input])[0].prompt_ids
