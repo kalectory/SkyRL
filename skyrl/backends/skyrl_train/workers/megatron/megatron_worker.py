@@ -982,7 +982,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.scheduler = None
         else:
             optim_config = init_megatron_optim_config(
-                self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
+                self.cfg.policy.optimizer_config,
+                self.cfg.policy.megatron_config.optimizer_config_kwargs,
+                bf16=self.cfg.bf16,
             )
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
