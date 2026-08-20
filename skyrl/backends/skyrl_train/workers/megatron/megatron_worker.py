@@ -469,7 +469,10 @@ class MegatronWorker:
 
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
-        provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
+        provider.params_dtype = torch.bfloat16 if bf16 else torch.float32
+        provider.bf16 = bf16
+        provider.fp16 = False
+        provider.pipeline_dtype = provider.params_dtype
         provider.context_parallel_size = megatron_config.context_parallel_size
         provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
         provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
