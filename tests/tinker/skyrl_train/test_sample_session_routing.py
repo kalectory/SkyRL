@@ -50,6 +50,7 @@ def _sample_input(**kwargs) -> types.SampleInput:
 
 def test_sample_with_remote_client_sets_session_id(monkeypatch):
     """Test that session_id is set correctly if routing key is present"""
+    monkeypatch.setattr(skyrl_train_backend, "_uses_lora_weight_sync", lambda cfg: False)
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
 
     spy = _SpyClient()
@@ -74,3 +75,24 @@ def test_sample_with_remote_client_sets_session_id(monkeypatch):
     sample(fake_self, batch_without_session)
     assert len(spy.payloads) == 1
     assert "session_id" not in spy.payloads[0]["json"]
+
+
+@pytest.mark.parametrize(
+    ("uses_lora_weight_sync", "expected_model"),
+    [(True, "model_test"), (False, BASE_MODEL)],
+)
+def test_sample_with_remote_client_routes_model(monkeypatch, uses_lora_weight_sync, expected_model):
+    monkeypatch.setattr(skyrl_train_backend, "_uses_lora_weight_sync", lambda cfg: uses_lora_weight_sync)
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+
+    spy = _SpyClient()
+    fake_self = SimpleNamespace(
+        _cfg=None,
+        _model_ids_to_role={"model_test": "policy"},
+        _inference_engine_client=spy,
+        _aggregate_sample_results=lambda prepared_batch, outputs: {},
+    )
+    sample = skyrl_train_backend.SkyRLTrainBackend._sample_with_remote_client
+    sample(fake_self, prepare_sample_batch({"req": ("model_test", _sample_input())}))
+
+    assert spy.payloads[0]["json"]["model"] == expected_model
