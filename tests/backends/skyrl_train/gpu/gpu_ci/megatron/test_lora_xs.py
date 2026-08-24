@@ -101,12 +101,10 @@ def test_lora_xs_export_materializes_and_restores_standard_lora(monkeypatch, exp
 
 @pytest.mark.parametrize("input_is_parallel", [False, True], ids=["column_parallel", "row_parallel"])
 @pytest.mark.parametrize("tp_rank", [0, 1])
-@pytest.mark.parametrize("use_residual_base", [False, True], ids=["lora_xs", "pissa_xs"])
 def test_lora_xs_initialization_reshards_frozen_factors(
     monkeypatch,
     input_is_parallel,
     tp_rank,
-    use_residual_base,
 ):
     torch.manual_seed(3)
     full_weight = torch.randn(12, 8)
@@ -143,17 +141,15 @@ def test_lora_xs_initialization_reshards_frozen_factors(
         tp_size,
         tp_rank,
         None,
-        use_residual_base,
     )
 
     linear_in, linear_out = lora_xs_init_worker.lora_xs_factors(full_weight, rank)
-    expected_base = full_weight - linear_out @ linear_in if use_residual_base else full_weight
-    torch.testing.assert_close(base_linear.weight, expected_base.chunk(tp_size, dim=base_shard_dim)[tp_rank])
+    torch.testing.assert_close(base_linear.weight, full_weight.chunk(tp_size, dim=base_shard_dim)[tp_rank])
     torch.testing.assert_close(
         adapter.linear_in.weight,
         linear_in.chunk(tp_size, dim=linear_in_shard_dim)[tp_rank],
     )
     torch.testing.assert_close(adapter.linear_out.weight, linear_out.chunk(tp_size, dim=0)[tp_rank])
-    expected_core = torch.eye(rank) if use_residual_base else torch.zeros(rank, rank)
+    expected_core = torch.zeros(rank, rank)
     torch.testing.assert_close(adapter.activation.weight, expected_core, atol=1e-4, rtol=0)
     assert not torch.equal(adapter.activation.weight, expected_core)

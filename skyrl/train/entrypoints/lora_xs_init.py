@@ -10,7 +10,6 @@ import torch
 
 from skyrl.backends.skyrl_train.workers.megatron.lora_xs_init_worker import (
     LoRAXSInitWorker,
-    PiSSAXSInitWorker,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
@@ -24,7 +23,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-model", required=True)
     parser.add_argument("--rank", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--init-method", choices=("lora_xs", "pissa_xs"), default="lora_xs")
     parser.add_argument("--config-overrides", type=json.loads, default={})
     return parser.parse_args()
 
@@ -53,12 +51,11 @@ def main() -> None:
 
     try:
         initialize_ray(cfg)
-        worker = LoRAXSInitWorker if args.init_method == "lora_xs" else PiSSAXSInitWorker
         policy = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.policy_num_nodes,
             cfg.trainer.placement.policy_num_gpus_per_node,
-            worker,
+            LoRAXSInitWorker,
             num_gpus_per_actor=1,
             colocate_all=False,
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
@@ -81,15 +78,6 @@ def main() -> None:
             {"global_step": 0, "config": get_config_as_dict(cfg)},
             checkpoint_dir / "trainer_state.pt",
         )
-        if args.init_method == "pissa_xs":
-            ray.get(
-                policy.async_run_ray_method(
-                    "pass_through",
-                    "save_residual_base",
-                    str(args.output_dir / "residual_base"),
-                    tokenizer,
-                )
-            )
         logger.info(f"LoRA-XS initialization artifacts saved to {args.output_dir}")
     finally:
         if ray.is_initialized():

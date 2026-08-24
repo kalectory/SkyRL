@@ -54,7 +54,6 @@ def _init_one_lora_xs_adapter(
     tp_size: int,
     tp_rank: int,
     tp_group,
-    use_residual_base: bool,
 ) -> None:
     base_weight = base_linear.weight
     if base_weight.is_meta:
@@ -73,14 +72,9 @@ def _init_one_lora_xs_adapter(
     adapter.linear_in.weight.copy_(_shard(linear_in, linear_in_shard_dim, tp_rank, tp_size).to(dtype))
     adapter.linear_out.weight.copy_(_shard(linear_out, 0, tp_rank, tp_size).to(dtype))
     adapter.activation.weight.normal_(std=LORA_XS_INIT_STD)
-    if use_residual_base:
-        adapter.activation.weight.add_(torch.eye(adapter.dim, device=base_weight.device, dtype=dtype))
-        scale = adapter.alpha / adapter.dim
-        residual = full_weight - scale * (linear_out @ linear_in)
-        base_weight.copy_(_shard(residual, base_shard_dim, tp_rank, tp_size).to(base_weight.dtype))
 
 
-def apply_lora_xs_init(model_chunks, use_residual_base: bool = False) -> None:
+def apply_lora_xs_init(model_chunks) -> None:
     """Initialize dense LoRA-XS adapters from their base weights."""
     import megatron.core.parallel_state as mpu
 
@@ -105,14 +99,11 @@ def apply_lora_xs_init(model_chunks, use_residual_base: bool = False) -> None:
             tp_size,
             tp_rank,
             tp_group,
-            use_residual_base,
         )
     logger.info(f"LoRA-XS: initialized {len(adapters)} adapter(s)")
 
 
 class LoRAXSInitWorkerBase(MegatronPolicyWorkerBase):
-    use_residual_base = False
-
     def make_megatron_module(
         self,
         wrap_with_ddp=True,
@@ -131,7 +122,7 @@ class LoRAXSInitWorkerBase(MegatronPolicyWorkerBase):
             return lora_model
 
         def lora_xs_pre_wrap_hook(model):
-            apply_lora_xs_init(model, self.use_residual_base)
+            apply_lora_xs_init(model)
             return model
 
         self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
@@ -149,25 +140,5 @@ class LoRAXSInitWorkerBase(MegatronPolicyWorkerBase):
             bf16=bf16,
         )
 
-    def save_residual_base(self, export_dir: str, tokenizer) -> None:
-        from skyrl.backends.skyrl_train.workers.megatron.pissa_init_worker import (
-            zeroed_adapters,
-        )
-
-        with zeroed_adapters(self.model.actor_module):
-            self.strategy.save_hf_model(
-                self.bridge,
-                self.model,
-                export_dir,
-                tokenizer=tokenizer,
-            )
-
-
-class PiSSAXSInitWorkerBase(LoRAXSInitWorkerBase):
-    """Megatron worker for residual-base PiSSA-XS initialization."""
-
-    use_residual_base = True
-
 
 LoRAXSInitWorker = ray.remote(num_gpus=1)(LoRAXSInitWorkerBase)
-PiSSAXSInitWorker = ray.remote(num_gpus=1)(PiSSAXSInitWorkerBase)
