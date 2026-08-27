@@ -1401,6 +1401,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return  # FFT path: no-op
         self.adapter_store.swap_to(model_id, self.actor_module, self.optimizer)
 
+    def capture_trainable_core_reference(self, model_id: str) -> None:
+        if self.adapter_store is None:
+            raise RuntimeError("Trainable-core instrumentation requires LoRA")
+        self.adapter_store.capture_trainable_core_reference(model_id, self.actor_module)
+
+    def trainable_core_delta_l2_squared(self, model_id: str) -> float:
+        if self.adapter_store is None:
+            raise RuntimeError("Trainable-core instrumentation requires LoRA")
+        return self.adapter_store.trainable_core_delta_l2_squared(model_id, self.actor_module)
+
     def adapter_store_state(self) -> dict:
         """Diagnostic: return current_id + registered model_ids. Cheap; useful
         for tests."""
