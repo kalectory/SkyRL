@@ -1,6 +1,9 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
+import pytest
+
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.extra import skyrl_train_inference_forwarding
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
@@ -49,6 +52,36 @@ def test_forwarding_timeout_matches_router_request_timeout():
     assert client._http_client.timeout.read == 1800.0
 
     asyncio.run(client.aclose())
+
+
+def test_forwarding_does_not_retry_read_timeout(monkeypatch):
+    client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    resolved = []
+    forwarded = []
+
+    async def resolve_proxy_url(*, force_refresh=False):
+        resolved.append(force_refresh)
+        return "http://proxy"
+
+    async def forward(proxy_url, sample_req, model_id, *, base_model):
+        forwarded.append((proxy_url, sample_req, model_id, base_model))
+        request = httpx.Request("POST", f"{proxy_url}/v1/completions")
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    monkeypatch.setattr(client, "_resolve_proxy_url", resolve_proxy_url)
+    monkeypatch.setattr(client, "_forward", forward)
+
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(
+            client._forward_with_retry(
+                sample_req="sample",
+                model_id="adapter",
+                base_model=None,
+            )
+        )
+
+    assert resolved == [False]
+    assert forwarded == [("http://proxy", "sample", "adapter", None)]
 
 
 async def _forward(client):

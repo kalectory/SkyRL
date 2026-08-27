@@ -106,6 +106,11 @@ class SkyRLTrainInferenceForwardingClient:
         try:
             proxy_url = await self._resolve_proxy_url()
             return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+        except httpx.ReadTimeout:
+            # The router may still be generating after the client read deadline.
+            # Retrying here can duplicate a full rollout and deepen an overloaded
+            # inference queue, so surface the timeout to the caller instead.
+            raise
         except httpx.RequestError as e:
             logger.warning(
                 "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
