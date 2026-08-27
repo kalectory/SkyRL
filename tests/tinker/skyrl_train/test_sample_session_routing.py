@@ -36,14 +36,14 @@ class _SpyClient:
         pass
 
 
-def _sample_input(**kwargs) -> types.SampleInput:
+def _sample_input(prompt_logprobs: bool = False, **kwargs) -> types.SampleInput:
     return types.SampleInput(
         base_model=BASE_MODEL,
         prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
         sampling_params=types.SamplingParams(temperature=0.0, max_tokens=4, seed=0),
         num_samples=1,
         checkpoint_id="",
-        prompt_logprobs=False,
+        prompt_logprobs=prompt_logprobs,
         **kwargs,
     )
 
@@ -51,6 +51,7 @@ def _sample_input(**kwargs) -> types.SampleInput:
 def test_sample_with_remote_client_sets_session_id(monkeypatch):
     """Test that session_id is set correctly if routing key is present"""
     monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    monkeypatch.setattr(skyrl_train_backend, "_uses_lora_weight_sync", lambda cfg: False)
 
     spy = _SpyClient()
     fake_self = SimpleNamespace(
@@ -74,3 +75,55 @@ def test_sample_with_remote_client_sets_session_id(monkeypatch):
     sample(fake_self, batch_without_session)
     assert len(spy.payloads) == 1
     assert "session_id" not in spy.payloads[0]["json"]
+
+
+def test_sample_with_remote_client_forwards_prompt_logprobs(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    monkeypatch.setattr(skyrl_train_backend, "_uses_lora_weight_sync", lambda cfg: False)
+
+    spy = _SpyClient()
+    fake_self = SimpleNamespace(
+        _cfg=None,
+        _base_lora_signature=None,
+        _model_ids_to_role={},
+        _inference_engine_client=spy,
+        _aggregate_sample_results=lambda prepared_batch, outputs: {},
+    )
+    batch = prepare_sample_batch({"req": ("", _sample_input(prompt_logprobs=True))})
+
+    skyrl_train_backend.SkyRLTrainBackend._sample_with_remote_client(fake_self, batch)
+
+    assert spy.payloads[0]["json"]["include_prompt_logprobs"] is True
+
+
+def test_aggregate_remote_sample_preserves_prompt_logprobs(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "_SKYRL_USE_NEW_INFERENCE", True)
+    batch = prepare_sample_batch({"req": ("", _sample_input(prompt_logprobs=True))})
+    sample_outputs = [
+        {
+            "sequences": [],
+            "prompt_logprobs": [None, -1.25, -0.75],
+        }
+    ]
+
+    results = skyrl_train_backend.SkyRLTrainBackend._aggregate_sample_results(
+        SimpleNamespace(), batch, sample_outputs
+    )
+
+    assert results["req"].prompt_logprobs == [None, -1.25, -0.75]
+
+
+def test_sample_accepts_base_model_request(monkeypatch):
+    monkeypatch.setattr(skyrl_train_backend, "_SKYRL_USE_NEW_INFERENCE", True)
+    forwarded = []
+    fake_self = SimpleNamespace(
+        _model_ids_to_role={},
+        _ensure_inference_engines=lambda: None,
+        _sample_with_remote_client=lambda batch: forwarded.append(batch) or {},
+    )
+    batch = prepare_sample_batch({"req": ("", _sample_input(prompt_logprobs=True))})
+
+    results = skyrl_train_backend.SkyRLTrainBackend.sample(fake_self, batch)
+
+    assert results == {}
+    assert forwarded == [batch]

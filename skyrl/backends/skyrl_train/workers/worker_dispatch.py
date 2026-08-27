@@ -98,6 +98,33 @@ class WorkerDispatch:
             return
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
+    def capture_trainable_core_reference(self, role: str, model_id: Optional[str]) -> None:
+        if (
+            model_id is None
+            or self.cfg.trainer.strategy != "megatron"
+            or self.cfg.trainer.policy.model.lora.rank <= 0
+        ):
+            return
+        ray.get(
+            self._actor_groups[role].async_run_ray_method(
+                "pass_through", "capture_trainable_core_reference", model_id
+            )
+        )
+
+    def trainable_core_delta_l2(self, role: str, model_id: Optional[str]) -> Optional[float]:
+        if (
+            model_id is None
+            or self.cfg.trainer.strategy != "megatron"
+            or self.cfg.trainer.policy.model.lora.rank <= 0
+        ):
+            return None
+        squared_norms = ray.get(
+            self._actor_groups[role].async_run_ray_method(
+                "pass_through", "trainable_core_delta_l2_squared", model_id
+            )
+        )
+        return (sum(squared_norms) / self.dp_size(role)) ** 0.5
+
     def register_adapter(self, role: str, model_id: str) -> None:
         """Register a new adapter slot on every worker (subsequent
         create_model). Pristine must already exist.
@@ -357,6 +384,7 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
+        self.capture_trainable_core_reference(model, model_id)
 
         # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
         kwargs = dict(worker_kwargs)
@@ -399,6 +427,7 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
+        self.capture_trainable_core_reference(model, model_id)
 
         # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
         kwargs = dict(worker_kwargs)
