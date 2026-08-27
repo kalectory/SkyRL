@@ -1,0 +1,82 @@
+import asyncio
+from types import SimpleNamespace
+
+from skyrl.tinker.extra import skyrl_train_inference_forwarding
+from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
+    SkyRLTrainInferenceForwardingClient,
+)
+
+
+class _Response:
+    def __init__(self):
+        self.status_code = 200
+        self.headers = {}
+        self.text = ""
+
+    def json(self):
+        return {
+            "choices": [
+                {
+                    "token_ids": [201],
+                    "logprobs": {"token_logprobs": [None, -1.25, -0.75, -0.5]},
+                    "prompt_logprobs": [
+                        None,
+                        {"102": {"logprob": -1.25}},
+                        {"103": {"logprob": -0.75}},
+                    ],
+                    "finish_reason": "length",
+                }
+            ]
+        }
+
+
+class _HttpClient:
+    def __init__(self):
+        self.payload = None
+
+    async def post(self, url, *, json, headers):
+        self.payload = json
+        return _Response()
+
+
+async def _forward(client):
+    sample_req = SimpleNamespace(
+        prompt=SimpleNamespace(to_types=lambda: object()),
+        sampling_params=SimpleNamespace(
+            seed=0,
+            max_tokens=1,
+            temperature=1.0,
+            top_p=1.0,
+            top_k=-1,
+            stop=None,
+        ),
+        num_samples=1,
+        prompt_logprobs=True,
+        sampling_session_id=None,
+        seq_id=None,
+    )
+    return await client._forward(
+        "http://proxy",
+        sample_req,
+        model_id="",
+        base_model="Qwen/Qwen3-4B-Instruct-2507",
+    )
+
+
+def test_forwarding_returns_requested_prompt_logprobs(monkeypatch):
+    monkeypatch.setattr(
+        skyrl_train_inference_forwarding,
+        "render_model_input",
+        lambda _: [SimpleNamespace(prompt_ids=[101, 102, 103])],
+    )
+    client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    client._http_client = _HttpClient()
+    client._serves_lora_adapters = True
+    client.engine_config = SimpleNamespace(base_model="Qwen/Qwen3-4B-Instruct-2507")
+
+    output = asyncio.run(_forward(client))
+
+    assert client._http_client.payload["echo"] is True
+    assert output.prompt_logprobs == [None, -1.25, -0.75]
+    assert output.sequences[0].tokens == [201]
+    assert output.sequences[0].logprobs == [-0.5]

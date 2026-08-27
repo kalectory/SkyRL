@@ -143,6 +143,12 @@ class SkyRLTrainInferenceForwardingClient:
             "stream": False,
             "return_token_ids": True,
         }
+        if sample_req.prompt_logprobs:
+            # vLLM's OpenAI completions endpoint computes prompt logprobs when
+            # echo is enabled. ``return_token_ids`` keeps choice.token_ids
+            # limited to generated tokens, so rollout sequence parsing below
+            # remains unchanged.
+            payload["echo"] = True
         # SamplingParams.stop is polymorphic (list[str] | list[int]).
         stop = getattr(sp, "stop", None)
         if stop:
@@ -171,10 +177,35 @@ class SkyRLTrainInferenceForwardingClient:
             ) from e
 
         sequences = []
+        prompt_logprobs = None
         for choice in result.get("choices", []):
             tokens = choice.get("token_ids", [])
             lp = choice.get("logprobs") or {}
             logprobs = lp.get("token_logprobs") or []
+            if sample_req.prompt_logprobs:
+                # With echo enabled token_logprobs contains prompt + generated
+                # positions, while token_ids contains generated positions only.
+                logprobs = logprobs[-len(tokens) :] if tokens else []
+                if prompt_logprobs is None:
+                    raw_prompt_logprobs = choice.get("prompt_logprobs")
+                    if raw_prompt_logprobs is None:
+                        raise RuntimeError("vLLM omitted requested prompt logprobs")
+                    if len(raw_prompt_logprobs) != len(prompt_tokens):
+                        raise RuntimeError(
+                            "vLLM returned prompt logprobs with an unexpected length: "
+                            f"expected {len(prompt_tokens)}, got {len(raw_prompt_logprobs)}"
+                        )
+                    prompt_logprobs = []
+                    for token_id, position in zip(prompt_tokens, raw_prompt_logprobs):
+                        if position is None:
+                            prompt_logprobs.append(None)
+                            continue
+                        token_logprob = position.get(str(token_id))
+                        if token_logprob is None:
+                            raise RuntimeError(
+                                f"vLLM prompt logprobs omitted prompt token {token_id}"
+                            )
+                        prompt_logprobs.append(float(token_logprob["logprob"]))
             # vLLM occasionally returns None for logprobs under load; zero-fill so
             # RL advantage computation doesn't see a ragged shape.
             if not logprobs and tokens:
@@ -191,4 +222,4 @@ class SkyRLTrainInferenceForwardingClient:
                 )
             )
 
-        return types.SampleOutput(sequences=sequences, prompt_logprobs=None)
+        return types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
