@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.extra import skyrl_train_inference_forwarding
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
     SkyRLTrainInferenceForwardingClient,
@@ -37,6 +38,17 @@ class _HttpClient:
     async def post(self, url, *, json, headers):
         self.payload = json
         return _Response()
+
+
+def test_forwarding_timeout_matches_router_request_timeout():
+    client = SkyRLTrainInferenceForwardingClient(
+        EngineConfig(base_model="Qwen/Qwen3-4B-Instruct-2507"),
+        db_engine=None,
+    )
+
+    assert client._http_client.timeout.read == 1800.0
+
+    asyncio.run(client.aclose())
 
 
 async def _forward(client):
