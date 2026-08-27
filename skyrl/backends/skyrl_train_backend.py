@@ -996,6 +996,9 @@ class SkyRLTrainBackend(AbstractBackend):
         metrics: dict[str, float] = {}
         if grad_norm is not None:
             metrics["skyrl.ai/grad_norm"] = float(grad_norm)
+        trainable_core_delta_l2 = self._dispatch.trainable_core_delta_l2(role, model_id)
+        if trainable_core_delta_l2 is not None:
+            metrics["skyrl.ai/trainable_core_delta_l2"] = trainable_core_delta_l2
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
         return types.OptimStepOutput(metrics=metrics)
 
@@ -1017,13 +1020,13 @@ class SkyRLTrainBackend(AbstractBackend):
         # model_ids in find_batchable_sample); we route each request via the
         # `model` field in _sample_with_remote_client below.
         unique_models = set(prepared_batch.all_model_ids)
-        unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
+        unknown = [mid for mid in unique_models if mid and mid not in self._model_ids_to_role]
         if unknown:
             error = types.ErrorResponse(
                 error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
-        non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
+        non_policy = [mid for mid in unique_models if mid and self._model_ids_to_role.get(mid) != "policy"]
         if non_policy:
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",

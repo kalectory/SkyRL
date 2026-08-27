@@ -149,6 +149,7 @@ class AdapterStore:
         self._pristine: Optional[AdapterSlot] = None
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
+        self._trainable_core_references: dict[str, List[torch.Tensor]] = {}
 
     @property
     def current_id(self) -> Optional[str]:
@@ -382,8 +383,35 @@ class AdapterStore:
         if model_id not in self._slots:
             raise KeyError(f"AdapterStore: unknown adapter '{model_id}'")
         del self._slots[model_id]
+        self._trainable_core_references.pop(model_id, None)
         if self._current_id == model_id:
             self._current_id = None
+
+    @torch.no_grad()
+    def capture_trainable_core_reference(self, model_id: str, model_chunks) -> None:
+        if model_id in self._trainable_core_references:
+            return
+        if self._current_id != model_id:
+            raise RuntimeError(f"AdapterStore: '{model_id}' is not the active adapter")
+        self._trainable_core_references[model_id] = [
+            buf.param_data.detach().clone()
+            for _mc_idx, _buf_idx, buf in _iter_buffers(model_chunks)
+        ]
+
+    @torch.no_grad()
+    def trainable_core_delta_l2_squared(self, model_id: str, model_chunks) -> float:
+        if self._current_id != model_id:
+            raise RuntimeError(f"AdapterStore: '{model_id}' is not the active adapter")
+        references = self._trainable_core_references[model_id]
+        buffers = [buf.param_data for _mc_idx, _buf_idx, buf in _iter_buffers(model_chunks)]
+        if len(buffers) != len(references):
+            raise RuntimeError("AdapterStore: trainable buffer layout changed after reference capture")
+        return float(
+            sum(
+                (buffer.float() - reference.float()).square().sum().item()
+                for buffer, reference in zip(buffers, references, strict=True)
+            )
+        )
 
     @torch.no_grad()
     def swap_to(self, model_id: str, model_chunks, optimizer) -> None:
