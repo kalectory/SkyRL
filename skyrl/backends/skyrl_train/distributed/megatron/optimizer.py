@@ -33,7 +33,7 @@ from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 
 
 def init_megatron_optim_config(
-    optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
+    optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict, bf16: bool = True
 ) -> OptimizerConfig:
     adam_betas = getattr(optim_config, "adam_betas", (0.9, 0.999))
     optim_args = {
@@ -44,8 +44,9 @@ def init_megatron_optim_config(
         "weight_decay": getattr(optim_config, "weight_decay", 1e-2),
         "adam_beta1": float(adam_betas[0]),
         "adam_beta2": float(adam_betas[1]),
-        "bf16": True,
-        "params_dtype": torch.bfloat16,
+        "bf16": bf16,
+        "params_dtype": torch.bfloat16 if bf16 else torch.float32,
+        "store_param_remainders": bf16,
         "use_distributed_optimizer": True,
     }
     # YAML dtype overrides arrive as strings; Megatron expects torch.dtype.

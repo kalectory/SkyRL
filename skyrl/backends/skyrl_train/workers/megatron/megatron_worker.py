@@ -1,6 +1,7 @@
 import os
 import shutil
 from collections import defaultdict
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -58,6 +59,7 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     LoraSignature,
     iter_opts,
 )
+from skyrl.backends.skyrl_train.workers.megatron.lora_xs import LoRAXS
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
@@ -467,7 +469,10 @@ class MegatronWorker:
 
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
-        provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
+        provider.params_dtype = torch.bfloat16 if bf16 else torch.float32
+        provider.bf16 = bf16
+        provider.fp16 = False
+        provider.pipeline_dtype = provider.params_dtype
         provider.context_parallel_size = megatron_config.context_parallel_size
         provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
         provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
@@ -582,6 +587,21 @@ class MegatronWorker:
                 lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+            )
+        elif lora_type == "lora_xs":
+            self.lora_cls = LoRAXS(
+                target_modules=(
+                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
+                    if lora_config.target_modules == "all-linear"
+                    else lora_config.target_modules
+                ),
+                dim=lora_config.rank,
+                alpha=lora_config.alpha,
+                dropout=lora_config.dropout,
+                lora_A_init_method=lora_config.init_method,
+                lora_B_init_method="zero",
+                exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+                lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
             )
 
     def make_megatron_module(
@@ -962,7 +982,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.scheduler = None
         else:
             optim_config = init_megatron_optim_config(
-                self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
+                self.cfg.policy.optimizer_config,
+                self.cfg.policy.megatron_config.optimizer_config_kwargs,
+                bf16=self.cfg.bf16,
             )
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
@@ -1416,8 +1438,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from safetensors.torch import save_file
 
         adapter_state = {}
-        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
-            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+        export_context = getattr(self.lora_cls, "export_context", nullcontext)
+        with export_context(self.actor_module):
+            for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
+                adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
