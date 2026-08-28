@@ -62,6 +62,10 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
 from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
+from skyrl.backends.skyrl_train.workers.megatron.pretrained_lora_init import (
+    PretrainedLoraConfig,
+    build_pretrained_lora_pre_wrap_hook,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -392,12 +396,10 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
 
-        ``bridge_weights_path`` (fake-INT4 QAT): when set, the Megatron-Bridge loads
-        its BF16 master weights from this path instead of ``model_path``. Used when
-        ``model_path`` is a compressed-tensors INT4 checkpoint (which the bridge
-        cannot load) served by the inference engine, while the trainer keeps BF16
-        masters and fake-quantizes them in the forward pass. Tokenizer + HF config
-        (the logical model identity) still come from ``model_path``.
+        When ``bridge_weights_path`` is set, Megatron-Bridge loads weights from
+        that checkpoint while tokenizer, HF config, and the inference engine keep
+        ``model_path`` as the logical model identity. This supports both fake-INT4
+        BF16 masters and identity-preserving pretrained-LoRA residual bases.
         """
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
@@ -431,7 +433,7 @@ class MegatronWorker:
         bridge_source = bridge_weights_path or model_path
         if bridge_weights_path:
             logger.info(
-                f"fake-INT4 QAT: loading BF16 master weights from {bridge_source} "
+                f"Megatron-Bridge: loading training weights from {bridge_source} "
                 f"(logical model / inference checkpoint: {model_path})"
             )
         bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
@@ -612,7 +614,9 @@ class MegatronWorker:
             # natively (upstream PR pending), pass init_method straight through here and
             # delete pissa_pre_wrap_hook + this placeholder.
             pissa = PissaConfig.from_init_method(lora_config.init_method)
-            self.configure_lora(lora_config, lora_type, "kaiming" if pissa else lora_config.init_method)
+            pretrained = PretrainedLoraConfig.from_init_method(lora_config.init_method)
+            placeholder_init = "kaiming" if pissa or pretrained else lora_config.init_method
+            self.configure_lora(lora_config, lora_type, placeholder_init)
 
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
@@ -623,6 +627,8 @@ class MegatronWorker:
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
             if pissa:
                 self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook(pissa))
+            if pretrained:
+                self.provider.register_pre_wrap_hook(build_pretrained_lora_pre_wrap_hook(pretrained))
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
@@ -912,6 +918,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Fake-INT4 QAT: install the MoE expert fake-quant hook and (when the
         # served checkpoint is INT4) redirect the trainer's BF16 master weights.
         bridge_weights_path = self._maybe_setup_fake_int4_qat()
+        residual_base_path = self.cfg.policy.model.lora.residual_base_path
+        if residual_base_path is not None:
+            if bridge_weights_path is not None:
+                raise ValueError("pretrained LoRA residual base conflicts with fake-INT4 BF16 master weights")
+            bridge_weights_path = residual_base_path
+            if self._rank == 0:
+                logger.info(f"pretrained LoRA: loading frozen residual base from {residual_base_path}")
 
         # initialize the bridge and provider objects
         self.init_configs(

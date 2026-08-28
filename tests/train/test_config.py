@@ -459,6 +459,30 @@ def test_fake_int4_qat_requires_unmerged_lora_sync():
         )
 
 
+def test_pretrained_lora_residual_config():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.lora.rank=32",
+            "trainer.policy.model.lora.init_method=pretrained:/artifact/adapter_model.safetensors",
+            "trainer.policy.model.lora.residual_base_path=/artifact/residual_base",
+        ]
+    )
+
+    assert cfg.trainer.policy.model.lora.residual_base_path == "/artifact/residual_base"
+
+
+def test_pretrained_lora_residual_requires_matching_adapter():
+    with pytest.raises(AssertionError, match="requires a.*pretrained"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "trainer.policy.model.lora.rank=32",
+                "trainer.policy.model.lora.residual_base_path=/artifact/residual_base",
+            ]
+        )
+
+
 class TestOverridesDictToDotlist:
     """``overrides_dict_to_dotlist`` emits values that ``OmegaConf.from_cli`` parses
     back to the same Python object. See https://github.com/NovaSky-AI/SkyRL/issues/1567.
