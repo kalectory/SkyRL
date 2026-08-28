@@ -106,9 +106,7 @@ def test_aggregate_remote_sample_preserves_prompt_logprobs(monkeypatch):
         }
     ]
 
-    results = skyrl_train_backend.SkyRLTrainBackend._aggregate_sample_results(
-        SimpleNamespace(), batch, sample_outputs
-    )
+    results = skyrl_train_backend.SkyRLTrainBackend._aggregate_sample_results(SimpleNamespace(), batch, sample_outputs)
 
     assert results["req"].prompt_logprobs == [None, -1.25, -0.75]
 
