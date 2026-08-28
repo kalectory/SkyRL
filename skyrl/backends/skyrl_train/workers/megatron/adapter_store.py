@@ -18,6 +18,8 @@ from megatron.core import parallel_state as mpu
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.optimizer import ChainedOptimizer
 
+from skyrl.utils.lora import compute_effective_lora_delta_squared
+
 
 def iter_opts(opt) -> List[Any]:
     """Yield underlying Megatron optimizers, unwrapping ChainedOptimizer."""
@@ -34,6 +36,18 @@ def _iter_buffers(model_chunks) -> Iterable[Tuple[int, int, Any]]:
         bufs = list(mc.buffers) + list(mc.expert_parallel_buffers)
         for buf_idx, buf in enumerate(bufs):
             yield mc_idx, buf_idx, buf
+
+
+def _iter_parallel_linear_adapters(model_chunks):
+    """Yield standard Megatron-Bridge LoRA adapters in model order."""
+    from megatron.bridge.peft.lora_layers import LoRALinear
+    from megatron.bridge.peft.utils import ParallelLinearAdapter
+
+    chunks = model_chunks if isinstance(model_chunks, (list, tuple)) else [model_chunks]
+    for chunk in chunks:
+        for module in chunk.modules():
+            if isinstance(module, LoRALinear) and isinstance(module.adapter, ParallelLinearAdapter):
+                yield module.adapter
 
 
 def _new_pinned_like(t: torch.Tensor) -> torch.Tensor:
@@ -150,6 +164,7 @@ class AdapterStore:
         self._current_id: Optional[str] = None
         self._signature: Optional[LoraSignature] = None
         self._trainable_core_references: dict[str, List[torch.Tensor]] = {}
+        self._effective_weight_references: dict[str, List[Tuple[torch.Tensor, torch.Tensor]]] = {}
 
     @property
     def current_id(self) -> Optional[str]:
@@ -385,6 +400,7 @@ class AdapterStore:
             raise KeyError(f"AdapterStore: unknown adapter '{model_id}'")
         del self._slots[model_id]
         self._trainable_core_references.pop(model_id, None)
+        self._effective_weight_references.pop(model_id, None)
         if self._current_id == model_id:
             self._current_id = None
 
@@ -395,9 +411,16 @@ class AdapterStore:
         if self._current_id != model_id:
             raise RuntimeError(f"AdapterStore: '{model_id}' is not the active adapter")
         self._trainable_core_references[model_id] = [
-            buf.param_data.detach().clone()
-            for _mc_idx, _buf_idx, buf in _iter_buffers(model_chunks)
+            buf.param_data.detach().clone() for _mc_idx, _buf_idx, buf in _iter_buffers(model_chunks)
         ]
+        if self._signature is not None and self._signature.tp_size == 1:
+            self._effective_weight_references[model_id] = [
+                (
+                    adapter.linear_in.weight.detach().clone(),
+                    adapter.linear_out.weight.detach().clone(),
+                )
+                for adapter in _iter_parallel_linear_adapters(model_chunks)
+            ]
 
     @torch.no_grad()
     def trainable_core_delta_l2_squared(self, model_id: str, model_chunks) -> float:
@@ -413,6 +436,38 @@ class AdapterStore:
                 for buffer, reference in zip(buffers, references, strict=True)
             )
         )
+
+    @torch.no_grad()
+    def compute_effective_weight_delta_frobenius_squared(self, model_id: str, model_chunks) -> Optional[float]:
+        """Return exact effective LoRA weight movement for TP=1.
+
+        Tensor-parallel adapters shard A or B differently by layer type. The
+        mechanism runs use TP=1, so decline to report instead of reconstructing
+        an unvalidated distributed value for other deployments.
+        """
+        if self._current_id != model_id:
+            raise RuntimeError(f"AdapterStore: '{model_id}' is not the active adapter")
+        if self._signature is None:
+            raise RuntimeError("AdapterStore: LoRA signature is not initialized")
+        if self._signature.tp_size != 1:
+            return None
+
+        references = self._effective_weight_references[model_id]
+        adapters = list(_iter_parallel_linear_adapters(model_chunks))
+        if len(adapters) != len(references):
+            raise RuntimeError("AdapterStore: LoRA adapter layout changed after reference capture")
+
+        squared_norm = sum(
+            compute_effective_lora_delta_squared(
+                adapter.linear_in.weight,
+                adapter.linear_out.weight,
+                reference_linear_in,
+                reference_linear_out,
+                adapter.alpha / adapter.dim,
+            ).item()
+            for adapter, (reference_linear_in, reference_linear_out) in zip(adapters, references, strict=True)
+        )
+        return float(squared_norm)
 
     @torch.no_grad()
     def swap_to(self, model_id: str, model_chunks, optimizer) -> None:

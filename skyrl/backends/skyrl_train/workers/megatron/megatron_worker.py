@@ -56,7 +56,10 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
-from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook, zeroed_adapters
+from skyrl.backends.skyrl_train.workers.megatron.pissa_init import (
+    pissa_pre_wrap_hook,
+    zeroed_adapters,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -1410,6 +1413,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.adapter_store is None:
             raise RuntimeError("Trainable-core instrumentation requires LoRA")
         return self.adapter_store.trainable_core_delta_l2_squared(model_id, self.actor_module)
+
+    def compute_effective_weight_delta_frobenius_squared(self, model_id: str) -> Optional[float]:
+        if self.adapter_store is None:
+            raise RuntimeError("Effective-weight instrumentation requires LoRA")
+        return self.adapter_store.compute_effective_weight_delta_frobenius_squared(model_id, self.actor_module)
 
     def adapter_store_state(self) -> dict:
         """Diagnostic: return current_id + registered model_ids. Cheap; useful
