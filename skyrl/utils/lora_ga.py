@@ -49,6 +49,14 @@ class LoraGADecomposition:
     captured_energy: float
 
 
+@dataclasses.dataclass(frozen=True)
+class LoraGALayerGroup:
+    """One Megatron-compatible target matrix and its Hugging Face projections."""
+
+    name: str
+    members: tuple[tuple[str, Any], ...]
+
+
 def decompose_loraga(
     weight: torch.Tensor,
     gradient: torch.Tensor,
@@ -243,6 +251,45 @@ def _collect_lora_layers(model: torch.nn.Module) -> list[tuple[str, Any]]:
     return layers
 
 
+def _group_lora_layers(layers: list[tuple[str, Any]]) -> list[LoraGALayerGroup]:
+    """Match Megatron's fused QKV and gate/up LoRA parameterization."""
+    by_name = dict(layers)
+    grouped_names: set[str] = set()
+    groups: list[LoraGALayerGroup] = []
+    fused_suffixes = (
+        (("q_proj", "k_proj", "v_proj"), "linear_qkv"),
+        (("gate_proj", "up_proj"), "linear_fc1"),
+    )
+
+    for name, _ in layers:
+        if name in grouped_names:
+            continue
+        for suffixes, fused_suffix in fused_suffixes:
+            matched_suffix = next((f".{suffix}" for suffix in suffixes if name.endswith(f".{suffix}")), None)
+            if matched_suffix is None:
+                continue
+            prefix = name[: -len(matched_suffix)]
+            member_names = tuple(f"{prefix}.{suffix}" for suffix in suffixes)
+            if not all(member_name in by_name for member_name in member_names):
+                missing = [member_name for member_name in member_names if member_name not in by_name]
+                raise ValueError(f"cannot build fused LoRA-GA group {prefix}.{fused_suffix}; missing {missing}")
+            groups.append(
+                LoraGALayerGroup(
+                    name=f"{prefix}.{fused_suffix}",
+                    members=tuple((member_name, by_name[member_name]) for member_name in member_names),
+                )
+            )
+            grouped_names.update(member_names)
+            break
+        else:
+            groups.append(LoraGALayerGroup(name=name, members=((name, by_name[name]),)))
+            grouped_names.add(name)
+
+    if grouped_names != set(by_name):
+        raise ValueError(f"failed to assign LoRA layers to fused groups: {sorted(set(by_name) - grouped_names)}")
+    return groups
+
+
 def _hash_files(root: Path) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
@@ -293,6 +340,7 @@ def materialize_loraga(
     peft_model = get_peft_model(model, lora_config).to(device)
     peft_model.config.use_cache = False
     lora_layers = _collect_lora_layers(peft_model)
+    lora_groups = _group_lora_layers(lora_layers)
 
     peft_model.requires_grad_(False)
     for _, layer in lora_layers:
@@ -323,33 +371,51 @@ def materialize_loraga(
     total_captured_energy = 0.0
     max_reconstruction_error = 0.0
 
-    for name, layer in lora_layers:
-        base_weight = layer.get_base_layer().weight
-        if base_weight.grad is None:
-            raise ValueError(f"target layer {name} has no full-weight gradient")
-        gradient = base_weight.grad.detach()
-        decomposition = decompose_loraga(base_weight.data, gradient, rank, scale)
-        layer.lora_A["default"].weight.data.copy_(decomposition.linear_in.to(layer.lora_A["default"].weight))
-        layer.lora_B["default"].weight.data.copy_(decomposition.linear_out.to(layer.lora_B["default"].weight))
-        base_weight.data.copy_(decomposition.residual.to(base_weight))
+    for group in lora_groups:
+        base_weights = [layer.get_base_layer().weight for _, layer in group.members]
+        missing_gradients = [
+            name for (name, _), weight in zip(group.members, base_weights, strict=True) if weight.grad is None
+        ]
+        if missing_gradients:
+            raise ValueError(f"target layers have no full-weight gradient: {missing_gradients}")
+        input_sizes = {weight.shape[1] for weight in base_weights}
+        if len(input_sizes) != 1:
+            raise ValueError(f"fused LoRA-GA group {group.name} has incompatible input sizes: {sorted(input_sizes)}")
 
-        reconstructed = base_weight.data.float() + scale * (
-            layer.lora_B["default"].weight.data.float() @ layer.lora_A["default"].weight.data.float()
-        )
-        expected = decomposition.residual + scale * (decomposition.linear_out @ decomposition.linear_in)
-        reconstruction_error = (reconstructed - expected).abs().max().item()
+        original_weight = torch.cat([weight.data.float() for weight in base_weights], dim=0)
+        gradient = torch.cat([weight.grad.detach().float() for weight in base_weights], dim=0)
+        decomposition = decompose_loraga(original_weight, gradient, rank, scale)
+
+        row_offset = 0
+        reconstructed_members = []
+        for (_, layer), base_weight in zip(group.members, base_weights, strict=True):
+            row_count = base_weight.shape[0]
+            linear_out = decomposition.linear_out[row_offset : row_offset + row_count]
+            residual = decomposition.residual[row_offset : row_offset + row_count]
+            layer.lora_A["default"].weight.data.copy_(decomposition.linear_in.to(layer.lora_A["default"].weight))
+            layer.lora_B["default"].weight.data.copy_(linear_out.to(layer.lora_B["default"].weight))
+            base_weight.data.copy_(residual.to(base_weight))
+            reconstructed_members.append(
+                base_weight.data.float()
+                + scale * (layer.lora_B["default"].weight.data.float() @ layer.lora_A["default"].weight.data.float())
+            )
+            base_weight.grad = None
+            row_offset += row_count
+
+        reconstructed = torch.cat(reconstructed_members, dim=0)
+        reconstruction_error = (reconstructed - original_weight).abs().max().item()
         max_reconstruction_error = max(max_reconstruction_error, reconstruction_error)
 
         gradient_energy = gradient.float().square().sum().item()
         total_gradient_energy += gradient_energy
         total_captured_energy += decomposition.captured_energy * gradient_energy
-        layer_metrics[name] = {
+        layer_metrics[group.name] = {
+            "members": [name for name, _ in group.members],
             "shape": list(gradient.shape),
             "gradient_frobenius": math.sqrt(gradient_energy),
             "captured_energy_top_2r": decomposition.captured_energy,
             "singular_values": decomposition.singular_values.detach().cpu().tolist(),
         }
-        base_weight.grad = None
 
     peft_model.eval()
     with torch.no_grad():
@@ -385,7 +451,7 @@ def materialize_loraga(
     spectra_path = output / "gradient_spectra.json"
     spectra_path.write_text(json.dumps(layer_metrics, indent=2, sort_keys=True))
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "method": "LoRA-GA",
         "source_model": model_path,
         "source_model_revision": getattr(model.config, "_commit_hash", None),
@@ -396,6 +462,7 @@ def materialize_loraga(
         "alpha": alpha,
         "adapter_scale": scale,
         "target_modules": "all-linear",
+        "adapter_parameterization": "megatron-fused-qkv-gate-up",
         "direction": LORAGA_DIRECTION,
         "stable_gamma": LORAGA_STABLE_GAMMA,
         "svd_seed": svd_seed,
@@ -408,7 +475,8 @@ def materialize_loraga(
         "batch": batch_summary,
         "gradient": {
             **gradient_metrics,
-            "n_target_layers": len(lora_layers),
+            "n_target_groups": len(lora_groups),
+            "n_target_modules": len(lora_layers),
             "frobenius": math.sqrt(total_gradient_energy),
             "captured_energy_top_2r": (
                 total_captured_energy / total_gradient_energy if total_gradient_energy > 0 else 0.0

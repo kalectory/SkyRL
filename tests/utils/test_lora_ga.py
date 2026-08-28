@@ -6,11 +6,47 @@ import pytest
 import torch
 
 from skyrl.utils.lora_ga import (
+    _group_lora_layers,
     batch_gspo_datums,
     decompose_loraga,
     load_gspo_datums,
     materialize_loraga,
 )
+
+
+class _Layer:
+    pass
+
+
+def test_group_lora_layers_matches_megatron_fusions():
+    layers = [
+        ("model.layers.0.self_attn.k_proj", _Layer()),
+        ("model.layers.0.self_attn.q_proj", _Layer()),
+        ("model.layers.0.self_attn.v_proj", _Layer()),
+        ("model.layers.0.self_attn.o_proj", _Layer()),
+        ("model.layers.0.mlp.gate_proj", _Layer()),
+        ("model.layers.0.mlp.up_proj", _Layer()),
+        ("model.layers.0.mlp.down_proj", _Layer()),
+    ]
+
+    groups = _group_lora_layers(layers)
+
+    assert [(group.name, [name for name, _ in group.members]) for group in groups] == [
+        (
+            "model.layers.0.self_attn.linear_qkv",
+            [
+                "model.layers.0.self_attn.q_proj",
+                "model.layers.0.self_attn.k_proj",
+                "model.layers.0.self_attn.v_proj",
+            ],
+        ),
+        ("model.layers.0.self_attn.o_proj", ["model.layers.0.self_attn.o_proj"]),
+        (
+            "model.layers.0.mlp.linear_fc1",
+            ["model.layers.0.mlp.gate_proj", "model.layers.0.mlp.up_proj"],
+        ),
+        ("model.layers.0.mlp.down_proj", ["model.layers.0.mlp.down_proj"]),
+    ]
 
 
 def test_decompose_loraga_covers_first_two_rank_gradient_modes():
@@ -111,6 +147,7 @@ def test_batch_gspo_datums_respects_padded_token_budget(tmp_path):
 def test_materialize_loraga_preserves_tiny_model_function(tmp_path, monkeypatch):
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("peft")
+    safetensors = pytest.importorskip("safetensors.torch")
 
     class _Tokenizer:
         pad_token_id = 0
@@ -174,7 +211,23 @@ def test_materialize_loraga_preserves_tiny_model_function(tmp_path, monkeypatch)
         max_batch_tokens=16,
     )
 
-    assert manifest["gradient"]["n_target_layers"] > 0
+    assert manifest["adapter_parameterization"] == "megatron-fused-qkv-gate-up"
+    assert manifest["gradient"]["n_target_groups"] == 4
+    assert manifest["gradient"]["n_target_modules"] == 7
     assert manifest["identity"]["reload_logit_max_abs"] < 1e-3
-    assert (tmp_path / "artifact" / "adapter" / "adapter_model.safetensors").exists()
+    adapter_path = tmp_path / "artifact" / "adapter" / "adapter_model.safetensors"
+    assert adapter_path.exists()
     assert (tmp_path / "artifact" / "residual_base" / "model.safetensors").exists()
+
+    adapter = safetensors.load_file(adapter_path)
+
+    def get_factor(projection):
+        matches = [
+            value for key, value in adapter.items() if f".{projection}." in key and key.endswith("lora_A.weight")
+        ]
+        assert len(matches) == 1
+        return matches[0]
+
+    assert torch.equal(get_factor("q_proj"), get_factor("k_proj"))
+    assert torch.equal(get_factor("k_proj"), get_factor("v_proj"))
+    assert torch.equal(get_factor("gate_proj"), get_factor("up_proj"))
