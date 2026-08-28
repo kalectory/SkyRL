@@ -1,5 +1,7 @@
 """CPU tests for precomputed Megatron LoRA initialization helpers."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -7,6 +9,7 @@ from skyrl.backends.skyrl_train.workers.megatron.pretrained_lora_init import (
     PretrainedLoraConfig,
     _get_hf_base_names,
     _get_projection_factors,
+    _merge_qkv_output_factors,
     _normalize_adapter_state,
 )
 
@@ -43,3 +46,21 @@ def test_normalize_adapter_state_strips_peft_prefix():
     state = _normalize_adapter_state({"base_model.model.model.layers.0.foo.lora_A.weight": tensor})
 
     assert state == {"model.layers.0.foo.lora_A.weight": tensor}
+
+
+def test_merge_qkv_output_factors_uses_adapter_rank_as_feature_dimension():
+    config = SimpleNamespace(
+        num_attention_heads=4,
+        num_query_groups=2,
+        kv_channels=2,
+        hidden_size=8,
+        attention_output_gate=False,
+    )
+    q = torch.arange(8 * 3).reshape(8, 3)
+    k = 100 + torch.arange(4 * 3).reshape(4, 3)
+    v = 200 + torch.arange(4 * 3).reshape(4, 3)
+
+    merged = _merge_qkv_output_factors(config, q, k, v)
+
+    expected = torch.cat((q[:4], k[:2], v[:2], q[4:], k[2:], v[2:]), dim=0)
+    assert torch.equal(merged, expected)

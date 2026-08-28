@@ -87,12 +87,39 @@ def _copy_factor(target: torch.Tensor, source: torch.Tensor, name: str) -> None:
     target.copy_(source.to(device=target.device, dtype=target.dtype))
 
 
+def _merge_qkv_output_factors(config, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Interleave PEFT Q/K/V output factors in Megatron's fused-QKV order."""
+    rank = q.shape[1]
+    if any(factor.ndim != 2 or factor.shape[1] != rank for factor in (q, k, v)):
+        raise ValueError("pretrained Q/K/V LoRA B factors must be rank-2 with a shared rank")
+
+    head_num = config.num_attention_heads
+    num_query_groups = config.num_query_groups
+    heads_per_group = head_num // num_query_groups
+    head_size = config.kv_channels or (config.hidden_size // head_num)
+    q_head_size = head_size * 2 if getattr(config, "attention_output_gate", False) else head_size
+    q = q.view(head_num, q_head_size, rank)
+    k = k.view(num_query_groups, head_size, rank)
+    v = v.view(num_query_groups, head_size, rank)
+    if getattr(config, "attention_output_gate", False):
+        q, output_gate = torch.chunk(q, 2, dim=1)
+
+    groups = []
+    for index in range(num_query_groups):
+        q_group = q[index * heads_per_group : (index + 1) * heads_per_group]
+        if getattr(config, "attention_output_gate", False):
+            output_gate_group = output_gate[index * heads_per_group : (index + 1) * heads_per_group]
+            groups.extend((q_group, output_gate_group, k[index : index + 1], v[index : index + 1]))
+        else:
+            groups.extend((q_group, k[index : index + 1], v[index : index + 1]))
+    return torch.cat(groups, dim=0).reshape(-1, rank)
+
+
 @torch.no_grad()
 def apply_pretrained_lora_init(model_chunks, config: PretrainedLoraConfig) -> None:
     """Overwrite fresh dense Megatron LoRA factors from a PEFT safetensors file."""
     import megatron.core.parallel_state as mpu
     from loguru import logger
-    from megatron.bridge.models.conversion.param_mapping import merge_qkv_weights
     from megatron.bridge.peft.lora_layers import LoRALinear
     from megatron.bridge.peft.utils import ParallelLinearAdapter
     from safetensors.torch import load_file
@@ -131,7 +158,7 @@ def apply_pretrained_lora_init(model_chunks, config: PretrainedLoraConfig) -> No
             used_keys.update(keys)
 
             if projection == "linear_qkv":
-                linear_out = merge_qkv_weights(module.to_wrap.config, *linear_outs)
+                linear_out = _merge_qkv_output_factors(module.to_wrap.config, *linear_outs)
             elif projection == "linear_fc1":
                 linear_out = torch.cat(linear_outs, dim=0)
             else:
