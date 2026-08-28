@@ -126,6 +126,11 @@ class SkyRLLoraConfig(BaseConfig):
       post-transform SVD overwrite. PiSSA wants alpha==rank, and rank must be
       divisible by the tensor-parallel size."""
 
+    residual_base_path: Optional[str] = None
+    """Megatron-only frozen residual base paired with a ``pretrained:`` adapter.
+    The logical ``model.path`` remains the original model served by vLLM; only
+    Megatron-Bridge loads weights from this local residual checkpoint."""
+
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
@@ -1528,6 +1533,20 @@ class TrainerConfig(BaseConfig):
                 "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
                 "sync preserves the inference engine's INT4 base weights."
             )
+
+        residual_base_path = self.policy.model.lora.residual_base_path
+        if residual_base_path is not None:
+            assert self.strategy == "megatron", (
+                "`trainer.policy.model.lora.residual_base_path` is only supported with " "`trainer.strategy=megatron`."
+            )
+            assert self.policy.model.lora.rank > 0, "`trainer.policy.model.lora.residual_base_path` requires LoRA."
+            assert self.policy.model.lora.init_method.startswith("pretrained:"), (
+                "`trainer.policy.model.lora.residual_base_path` requires a "
+                "`trainer.policy.model.lora.init_method=pretrained:<adapter>` pair."
+            )
+            assert (
+                self.policy.model.fake_int4_qat.bf16_base_path is None
+            ), "A pretrained LoRA residual base cannot also set fake_int4_qat.bf16_base_path."
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
