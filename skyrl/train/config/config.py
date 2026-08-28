@@ -119,6 +119,8 @@ class SkyRLLoraConfig(BaseConfig):
     PiSSA values: "pissa" (exact SVD) or "pissa_niter_<N>" (fast randomized SVD),
     which seed A/B from the base weight's principal singular components and freeze
     the residual W_res = W - A·B in place of W.
+    A Megatron residual base can load precomputed PEFT factors with
+    "pretrained:<adapter_model.safetensors>" (currently TP=1 and PP=1).
     - FSDP: passed straight to PEFT ``init_lora_weights`` (PiSSA handled natively).
     - Megatron: standard values feed ``lora_A_init_method``; PiSSA values trigger a
       post-transform SVD overwrite. PiSSA wants alpha==rank, and rank must be

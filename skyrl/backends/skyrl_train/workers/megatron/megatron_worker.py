@@ -62,6 +62,10 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
 from skyrl.backends.skyrl_train.workers.megatron.pissa_init import pissa_pre_wrap_hook
+from skyrl.backends.skyrl_train.workers.megatron.pretrained_lora_init import (
+    PretrainedLoraConfig,
+    build_pretrained_lora_pre_wrap_hook,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -612,7 +616,9 @@ class MegatronWorker:
             # natively (upstream PR pending), pass init_method straight through here and
             # delete pissa_pre_wrap_hook + this placeholder.
             pissa = PissaConfig.from_init_method(lora_config.init_method)
-            self.configure_lora(lora_config, lora_type, "kaiming" if pissa else lora_config.init_method)
+            pretrained = PretrainedLoraConfig.from_init_method(lora_config.init_method)
+            placeholder_init = "kaiming" if pissa or pretrained else lora_config.init_method
+            self.configure_lora(lora_config, lora_type, placeholder_init)
 
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
@@ -623,6 +629,8 @@ class MegatronWorker:
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
             if pissa:
                 self.provider.register_pre_wrap_hook(pissa_pre_wrap_hook(pissa))
+            if pretrained:
+                self.provider.register_pre_wrap_hook(build_pretrained_lora_pre_wrap_hook(pretrained))
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
