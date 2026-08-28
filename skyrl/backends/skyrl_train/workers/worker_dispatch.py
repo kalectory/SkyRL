@@ -99,30 +99,32 @@ class WorkerDispatch:
         ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
 
     def capture_trainable_core_reference(self, role: str, model_id: Optional[str]) -> None:
-        if (
-            model_id is None
-            or self.cfg.trainer.strategy != "megatron"
-            or self.cfg.trainer.policy.model.lora.rank <= 0
-        ):
+        if model_id is None or self.cfg.trainer.strategy != "megatron" or self.cfg.trainer.policy.model.lora.rank <= 0:
             return
         ray.get(
-            self._actor_groups[role].async_run_ray_method(
-                "pass_through", "capture_trainable_core_reference", model_id
-            )
+            self._actor_groups[role].async_run_ray_method("pass_through", "capture_trainable_core_reference", model_id)
         )
 
     def trainable_core_delta_l2(self, role: str, model_id: Optional[str]) -> Optional[float]:
-        if (
-            model_id is None
-            or self.cfg.trainer.strategy != "megatron"
-            or self.cfg.trainer.policy.model.lora.rank <= 0
-        ):
+        if model_id is None or self.cfg.trainer.strategy != "megatron" or self.cfg.trainer.policy.model.lora.rank <= 0:
+            return None
+        squared_norms = ray.get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "trainable_core_delta_l2_squared", model_id)
+        )
+        return (sum(squared_norms) / self.dp_size(role)) ** 0.5
+
+    def compute_effective_weight_delta_frobenius(self, role: str, model_id: Optional[str]) -> Optional[float]:
+        if model_id is None or self.cfg.trainer.strategy != "megatron" or self.cfg.trainer.policy.model.lora.rank <= 0:
             return None
         squared_norms = ray.get(
             self._actor_groups[role].async_run_ray_method(
-                "pass_through", "trainable_core_delta_l2_squared", model_id
+                "pass_through", "compute_effective_weight_delta_frobenius_squared", model_id
             )
         )
+        if all(value is None for value in squared_norms):
+            return None
+        if any(value is None for value in squared_norms):
+            raise RuntimeError("Effective-weight instrumentation returned inconsistent TP support")
         return (sum(squared_norms) / self.dp_size(role)) ** 0.5
 
     def register_adapter(self, role: str, model_id: str) -> None:

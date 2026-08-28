@@ -20,7 +20,10 @@ from skyrl.backends.renderer import (
     VLLMRenderer,
     render_model_input,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import _uses_lora_weight_sync, resolve_policy_model_name
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _uses_lora_weight_sync,
+    resolve_policy_model_name,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
@@ -1041,6 +1044,9 @@ class SkyRLTrainBackend(AbstractBackend):
         trainable_core_delta_l2 = self._dispatch.trainable_core_delta_l2(role, model_id)
         if trainable_core_delta_l2 is not None:
             metrics["skyrl.ai/trainable_core_delta_l2"] = trainable_core_delta_l2
+        effective_weight_delta = self._dispatch.compute_effective_weight_delta_frobenius(role, model_id)
+        if effective_weight_delta is not None:
+            metrics["skyrl.ai/effective_weight_delta_frobenius"] = effective_weight_delta
         metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
         return types.OptimStepOutput(metrics=metrics)
 
