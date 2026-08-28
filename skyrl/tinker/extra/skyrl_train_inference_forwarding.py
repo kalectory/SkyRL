@@ -26,8 +26,7 @@ class SkyRLTrainInferenceForwardingClient:
         self.db_engine = db_engine
         bc = engine_config.backend_config
         self._serves_lora_adapters = not (
-            bc.get("strategy") == "megatron"
-            and bc.get("trainer.policy.megatron_config.lora_config.merge_lora", False)
+            bc.get("strategy") == "megatron" and bc.get("trainer.policy.megatron_config.lora_config.merge_lora", False)
         )
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
@@ -37,7 +36,7 @@ class SkyRLTrainInferenceForwardingClient:
         max_conn = engine_config.forwarding_inference_max_connections
         max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
         self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(1800.0, connect=10.0),
             limits=httpx.Limits(
                 max_connections=max_conn,
                 max_keepalive_connections=max_keepalive,
@@ -104,6 +103,10 @@ class SkyRLTrainInferenceForwardingClient:
         try:
             proxy_url = await self._resolve_proxy_url()
             return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+        except httpx.ReadTimeout:
+            # The request may still be generating downstream. Replaying it would
+            # duplicate the full generation and add more load to the same queue.
+            raise
         except httpx.RequestError as e:
             logger.warning(
                 "Network error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
