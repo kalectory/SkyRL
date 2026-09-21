@@ -27,6 +27,9 @@ from skyrl.backends.skyrl_train.patches.inkling.patch_transformers import (
     validate_inkling_lora_targets,
 )
 
+# SkyRL's vllm-marked CPU job installs the FSDP extra, including SciPy.
+pytestmark = pytest.mark.vllm
+
 
 @pytest.fixture(autouse=True)
 def native_torch_convolution_for_cpu_tests(monkeypatch, request):
