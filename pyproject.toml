@@ -484,7 +484,7 @@ harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f
 # NVRx 0.6 wheels require glibc 2.39; its supported source build also works on Ubuntu 22.04.
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
 # Native Inkling support, based on upstream 8e7077c6; switch to upstream after merge.
-megatron-bridge = {git = "https://github.com/kalectory/Megatron-Bridge", rev = "0d4457af762670d6fb94e077bf43179a56c08a6d", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/kalectory/Megatron-Bridge", rev = "7cd9a887d89a46c6e7f646b7901564fe180744d5", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
