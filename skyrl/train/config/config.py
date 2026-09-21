@@ -104,6 +104,9 @@ class SkyRLLoraConfig(BaseConfig):
     """Scaling factor for LoRA updates."""
     dropout: float = 0.0
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
+    bf16_base: bool = False
+    """FSDP: load frozen base weights in BF16 while PEFT keeps trainable adapters in FP32.
+    Has no effect when LoRA is disabled; optimizer state and gradient reduction retain their configured precision."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups."""

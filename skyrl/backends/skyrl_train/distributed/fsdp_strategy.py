@@ -33,6 +33,10 @@ from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     offload_fsdp2_model_to_cpu,
     offload_fsdp_optimizer,
 )
+from skyrl.backends.skyrl_train.distributed.lora_checkpoint import (
+    load_trainable_state_dict,
+    trainable_state_dict,
+)
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
@@ -250,6 +254,18 @@ class FSDPStrategy(DistributedStrategy):
                 sub._buffers[bname] = buf
 
         apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+        if not cpu_offload:
+            # Allocate only the final DTensor shards. With an all-meta state
+            # dict, DCP falls back to the mixed process group's CPU backend
+            # and broadcasts full weights through Gloo instead of CUDA/NCCL.
+            # FSDP2's documented meta-init order is fully_shard -> to_empty.
+            module.to_empty(device=torch.cuda.current_device())
+            # to_empty also clears buffers, including the rank-0 values
+            # restored above. Preserve them for the existing buffer broadcast.
+            if dist.get_rank() == 0:
+                for (sub_name, bname), buf in non_persistent_snapshot.items():
+                    sub = module.get_submodule(sub_name) if sub_name else module
+                    sub._buffers[bname] = buf
         fsdp2_load_full_state_dict(module, full_state, cpu_offload)
         return module
 
@@ -396,7 +412,7 @@ class FSDPStrategy(DistributedStrategy):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 # FSDP2 state_dict returns DTensors directly; no state_dict_type context needed.
-                model_state_dict = save_model.state_dict()
+                model_state_dict = trainable_state_dict(save_model) if self.is_lora else save_model.state_dict()
                 self.print(f"[rank-{rank}]: Saving model to {model_path}")
                 with io.open_file(model_path, "wb") as f:
                     torch.save(model_state_dict, f)
@@ -416,6 +432,7 @@ class FSDPStrategy(DistributedStrategy):
 
                 # Create extra state dict with client state and any additional info
                 extra_state_dict = {
+                    "trainable_only": self.is_lora,
                     "lr_scheduler": lr_scheduler_state_dict,
                     "client_state": client_state,
                     "tag": tag,
@@ -519,7 +536,10 @@ class FSDPStrategy(DistributedStrategy):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # FSDP2: load_state_dict accepts DTensors directly; no state_dict_type context needed.
-            load_model.load_state_dict(model_state_dict, strict=load_module_strict)
+            if extra_state_dict.get("trainable_only", False):
+                load_trainable_state_dict(load_model, model_state_dict, strict=load_module_strict)
+            else:
+                load_model.load_state_dict(model_state_dict, strict=load_module_strict)
             self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
             # Load optimizer state dict if optimizer object is provided and loading is requested

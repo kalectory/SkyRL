@@ -115,6 +115,8 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
+    # Transformers Inkling initializes relative-position weights with linear_sum_assignment.
+    "scipy",
     "vllm==0.28.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,

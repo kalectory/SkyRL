@@ -20,7 +20,10 @@ from skyrl.backends.renderer import (
     VLLMRenderer,
     render_model_input,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    _uses_lora_weight_sync,
+    resolve_policy_model_name,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
@@ -89,6 +92,8 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    if lora_config is not None and lora_config.rank > 0:
+        user_overrides["trainer.seed"] = lora_config.seed
     # The Tinker path drives profiling through /start_profiling, which builds the
     # profiler at request time. A static config here would fight it over the single
     # `worker.profiler` slot, so reject it rather than letting both sources win
@@ -1522,8 +1527,6 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
-        adapter_only_sync = self._adapter_only_sync
-
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
         # before broadcasting and the worker registers it on vLLM under that
         # name. None for the FFT / single-tenant path uses legacy behavior.
@@ -1542,7 +1545,7 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
-            if adapter_only_sync:
+            if _uses_lora_weight_sync(self._cfg):
                 # The sync above just exported the live PEFT adapter files to
                 # the per-node lora_sync_path; tar those (GBs) instead of
                 # streaming a full merged HF export (TBs for Kimi-scale MoE,
