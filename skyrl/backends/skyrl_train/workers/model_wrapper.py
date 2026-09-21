@@ -26,6 +26,12 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
 )
+from skyrl.backends.skyrl_train.patches.inkling import (
+    correct_inkling_expert_size,
+    install_inkling_precision,
+    prepare_inkling_precision,
+    validate_inkling_lora_targets,
+)
 from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
@@ -78,6 +84,7 @@ class HFModelWrapper(nn.Module):
         model_config_kwargs: dict = {},
         meta_init: bool = False,
         language_model_only: bool = False,
+        inkling_flex_attention: bool = False,
         logprobs_chunk_size: int = 1024,
         **kwargs,
     ) -> None:
@@ -112,6 +119,10 @@ class HFModelWrapper(nn.Module):
                 model_class = AutoModelForCausalLM
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
+            correct_inkling_expert_size(model_config, pretrain_or_model, model_config_kwargs)
+            prepare_inkling_precision(model_config)
+            if lora_rank > 0:
+                validate_inkling_lora_targets(model_config, target_modules)
 
             if language_model_only:
                 logger.info("[VLM] language_model_only=True, skipping vision encoder initialization")
@@ -153,11 +164,26 @@ class HFModelWrapper(nn.Module):
                     pretrain_or_model,
                     config=model_config,
                     trust_remote_code=True,
+                    revision=model_config_kwargs.get("revision"),
                     attn_implementation=self.attn_implementation,
                     quantization_config=nf4_config,
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                     device_map=device_map,
                 )
+
+            # Preserve convolution and router precision on loaded and meta ranks.
+            install_inkling_precision(self.model)
+
+            if inkling_flex_attention:
+                if remove_microbatch_padding or sequence_parallel_size != 1:
+                    raise ValueError(
+                        "Inkling compact attention requires unpacked sequences without sequence parallelism"
+                    )
+                from skyrl.backends.skyrl_train.patches.inkling_attention import (
+                    install_inkling_flex_attention,
+                )
+
+                install_inkling_flex_attention(self.model)
 
             # gpt oss
             if Version(transformers.__version__) >= Version("4.56.2"):
@@ -331,7 +357,7 @@ class HFModelWrapper(nn.Module):
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
         logits_BSV = output["logits"]
-        logits_BSV.div_(temperature)
+        output["logits"] = logits_BSV = logits_BSV / temperature
 
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
         log_probs = logprobs_from_logits(

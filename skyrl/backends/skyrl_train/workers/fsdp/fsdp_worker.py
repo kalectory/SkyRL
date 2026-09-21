@@ -21,6 +21,7 @@ from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.inkling import inkling_lora_for_inference
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
@@ -159,13 +160,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
         self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not getattr(model_config.get_text_config(), "tie_word_embeddings", False),
+            mesh=self.strategy.device_mesh,
         )
 
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.policy.inference_only_init,
+            bf16=self.cfg.policy.inference_only_init or (self._is_lora and self.cfg.policy.model.lora.bf16_base),
             lora_rank=self.cfg.policy.model.lora.rank,
             lora_alpha=self.cfg.policy.model.lora.alpha,
             lora_dropout=self.cfg.policy.model.lora.dropout,
@@ -178,6 +180,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
             language_model_only=self.cfg.policy.language_model_only,
+            inkling_flex_attention=self.cfg.policy.inkling_flex_attention,
             logprobs_chunk_size=self.cfg.logprobs_chunk_size,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -282,6 +285,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             peft_config["task_type"] = peft_config["task_type"].value
             peft_config["peft_type"] = peft_config["peft_type"].value
             peft_config["target_modules"] = list(peft_config["target_modules"])
+            lora_params, peft_config = inkling_lora_for_inference(peft_model.config, lora_params, peft_config)
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
@@ -402,7 +406,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not getattr(model_config.get_text_config(), "tie_word_embeddings", False),
+            mesh=self.strategy.device_mesh,
         )
 
         critic = get_llm_for_sequence_regression(
@@ -467,7 +472,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         use_meta = should_use_meta_init(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            use_meta_tensor=not getattr(model_config.get_text_config(), "tie_word_embeddings", False),
+            mesh=self.strategy.device_mesh,
         )
 
         wrapped_model = HFModelWrapper(

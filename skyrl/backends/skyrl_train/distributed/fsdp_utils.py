@@ -27,6 +27,7 @@ from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.distributed import DeviceMesh
 from torch.distributed.device_mesh import init_device_mesh
 
+from skyrl.backends.skyrl_train.patches.inkling import inkling_fp32_modules
 from skyrl.train.config import FSDPConfig
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
@@ -209,6 +210,21 @@ def fsdp2_get_full_state_dict(model: torch.nn.Module, cpu_offload=True, rank0_on
 def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+    # Separate groups preserve Inkling convolution and router FP32 computation.
+    for module in inkling_fp32_modules(model):
+        from transformers.models.inkling.modeling_inkling import InklingTopkRouter
+
+        fully_shard(
+            module,
+            **{
+                **fsdp_kwargs,
+                "mp_policy": MixedPrecisionPolicy(
+                    param_dtype=torch.float32,
+                    reduce_dtype=torch.float32,
+                    cast_forward_inputs=isinstance(module, InklingTopkRouter),
+                ),
+            },
+        )
     default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
     fsdp_transformer_layer_cls_to_wrap = (
         config.wrap_policy.get("transformer_layer_cls_to_wrap", None)
@@ -226,7 +242,8 @@ def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
     modules = []
     for name, module in model.named_modules():
         if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
-            isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
+            isinstance(module, nn.Embedding)
+            and not getattr(model.config.get_text_config(), "tie_word_embeddings", False)
         ):
             modules.append(module)
 

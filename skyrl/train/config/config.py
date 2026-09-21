@@ -104,6 +104,9 @@ class SkyRLLoraConfig(BaseConfig):
     """Scaling factor for LoRA updates."""
     dropout: float = 0.0
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
+    bf16_base: bool = False
+    """FSDP: load frozen base weights in BF16 while PEFT keeps trainable adapters in FP32.
+    Has no effect when LoRA is disabled; optimizer state and gradient reduction retain their configured precision."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups."""
@@ -691,6 +694,9 @@ class PolicyConfig(BaseConfig):
     language_model_only: bool = False
     """When True, skip vision encoder initialization for multimodal models (e.g. Qwen3.5).
     Loads only the language model backbone using AutoModelForCausalLM."""
+    inkling_flex_attention: bool = False
+    """Use compact relative-position bias with native FlexAttention for Inkling text training.
+    Requires unpacked sequences, zero attention dropout, and no KV cache."""
     inference_only_init: bool = False
     """When True, set up the policy worker for inference-only flows (forward + weight
     sync, no train_step), skipping the training-only state that would otherwise OOM
