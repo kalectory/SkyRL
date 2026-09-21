@@ -56,10 +56,9 @@ def test_lora_export_targets_inference_modules(
         peft_wrapper_prefix + source_module + ".lora_B.weight": torch.arange(8, dtype=torch.float32).reshape(4, 2),
     }
     peft_model = SimpleNamespace(
-        config=SimpleNamespace(model_type="qwen3_5"),
         peft_config={
             "default": LoraConfig(r=2, target_modules=[source_module.rsplit(".", 1)[-1]], task_type=TaskType.CAUSAL_LM)
-        },
+        }
     )
     worker = SimpleNamespace(model=SimpleNamespace(model=peft_model), _is_multimodal_lm_only=is_multimodal_lm_only)
     monkeypatch.setattr(fsdp_utils, "collect_lora_params", lambda module: source_params)
@@ -121,8 +120,7 @@ def test_lora_export_preserves_unrecognized_prefix(tmp_path, monkeypatch, unreco
         original_name: torch.ones(4, 2),
     }
     peft_model = SimpleNamespace(
-        config=SimpleNamespace(model_type="qwen3_5"),
-        peft_config={"default": LoraConfig(r=2, target_modules=["q_proj"], task_type=TaskType.CAUSAL_LM)},
+        peft_config={"default": LoraConfig(r=2, target_modules=["q_proj"], task_type=TaskType.CAUSAL_LM)}
     )
     worker = SimpleNamespace(model=SimpleNamespace(model=peft_model), _is_multimodal_lm_only=is_multimodal_lm_only)
     monkeypatch.setattr(fsdp_utils, "collect_lora_params", lambda module: source_params)

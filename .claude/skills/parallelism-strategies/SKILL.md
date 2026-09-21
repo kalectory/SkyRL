@@ -8,6 +8,8 @@ description: Operational guide for choosing and combining parallelism strategies
 > **Source.** Adapted from NVIDIA Megatron-Bridge docs:
 > `https://docs.nvidia.com/nemo/megatron-bridge/latest/skills/perf-techniques/parallelism-strategies/SKILL.html`
 > Re-fetch from upstream when bumping the `megatron-bridge` pin in `pyproject.toml`.
+> Refreshed against upstream `8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0`
+> (`skills/nemo-mbridge-perf-parallelism-strategies/SKILL.md`).
 >
 > **SkyRL adaptation.** Upstream uses `cfg.model.<field>`. In SkyRL these are surfaced through `MegatronConfig` (`skyrl/train/config.py`) and set on the CLI as e.g. `trainer.megatron.tensor_model_parallel_size=...` for SFT and `trainer.policy.megatron_config.` for RL. Field names are otherwise identical.
 >
@@ -124,7 +126,14 @@ DP size is always implicit:
 
 ```
 data_parallel_size = world_size / (TP * PP * CP)
+expert_data_parallel_size = world_size / (PP * EP * ETP)
 ```
+
+The dense and expert meshes share GPUs within each pipeline stage. The GPU
+count must satisfy both divisibility constraints; do not multiply all five
+parallelism dimensions. With the usual power-of-two mesh sizes, the minimum
+is `PP * max(TP * CP, EP * ETP)`. For example, TP=2, CP=1, EP=8, ETP=1,
+PP=1 needs 8 GPUs: dense DP=4 and expert DP=1. Model capacity may require more.
 
 ## Memory Estimation
 

@@ -20,10 +20,7 @@ from skyrl.backends.renderer import (
     VLLMRenderer,
     render_model_input,
 )
-from skyrl.backends.skyrl_train.inference_servers.utils import (
-    _uses_lora_weight_sync,
-    resolve_policy_model_name,
-)
+from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
@@ -1527,6 +1524,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
+        adapter_only_sync = self._adapter_only_sync
+
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
         # before broadcasting and the worker registers it on vLLM under that
         # name. None for the FFT / single-tenant path uses legacy behavior.
@@ -1545,7 +1544,7 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
-            if _uses_lora_weight_sync(self._cfg):
+            if adapter_only_sync:
                 # The sync above just exported the live PEFT adapter files to
                 # the per-node lora_sync_path; tar those (GBs) instead of
                 # streaming a full merged HF export (TBs for Kimi-scale MoE,

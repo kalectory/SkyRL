@@ -112,21 +112,6 @@ class HFModelWrapper(nn.Module):
                 model_class = AutoModelForCausalLM
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
-            if model_config.model_type == "inkling_mm_model":
-                from skyrl.backends.skyrl_train.patches.inkling.patch_transformers import (
-                    prepare_inkling_config,
-                )
-
-                prepare_inkling_config(
-                    model_config,
-                    pretrain_or_model,
-                    model_config_kwargs,
-                    lora_rank=lora_rank,
-                    target_modules=target_modules,
-                    remove_microbatch_padding=remove_microbatch_padding,
-                    sequence_parallel_size=sequence_parallel_size,
-                    language_model_only=language_model_only,
-                )
 
             if language_model_only:
                 logger.info("[VLM] language_model_only=True, skipping vision encoder initialization")
@@ -168,19 +153,11 @@ class HFModelWrapper(nn.Module):
                     pretrain_or_model,
                     config=model_config,
                     trust_remote_code=True,
-                    revision=model_config_kwargs.get("revision"),
                     attn_implementation=self.attn_implementation,
                     quantization_config=nf4_config,
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                     device_map=device_map,
                 )
-
-            if model_config.model_type == "inkling_mm_model":
-                from skyrl.backends.skyrl_train.patches.inkling.patch_transformers import (
-                    patch_inkling_model,
-                )
-
-                patch_inkling_model(self.model)
 
             # gpt oss
             if Version(transformers.__version__) >= Version("4.56.2"):
@@ -354,7 +331,7 @@ class HFModelWrapper(nn.Module):
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
         logits_BSV = output["logits"]
-        output["logits"] = logits_BSV = logits_BSV / temperature
+        logits_BSV.div_(temperature)
 
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
         log_probs = logprobs_from_logits(
