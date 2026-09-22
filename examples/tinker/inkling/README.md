@@ -2,8 +2,9 @@
 
 This text-only attention-LoRA recipe uses Inkling-Small (276B total / 12B active
 parameters) through Megatron-Bridge's native Inkling model. The candidate topology
-uses two eight-GPU H200 nodes: an EP8 learner and a separate TP8 inference engine.
-Full-model memory, parity, and 32,768-token capacity validation are pending.
+uses two eight-GPU H200 nodes: a TP2/EP8 learner (expert TP1, dense DP4, expert
+DP1) and a separate TP8 inference engine. SkyRL enables sequence parallelism
+with TP2. Full-model qualification of this topology is pending.
 
 Use an existing 16-GPU Ray cluster with the same SkyRL environment on every node.
 Set `INKLING_MULTIMEM_AR=0` in the head and worker environments before starting
@@ -41,4 +42,5 @@ The lockfile pins [Megatron-Bridge's native Inkling contribution](https://github
 and its matching Megatron-Core revision. Earlier FSDP experiment results do not
 qualify this native Megatron implementation. The Bridge contribution passes
 tiny-model TP1/EP1, TP2/EP1, and TP1/EP2 conversion, forward/backward, LoRA export,
-and checkpoint-restore tests; full-model qualification remains pending.
+and checkpoint-restore tests. Full-model TP2/EP8 qualification and production
+learning remain pending.
